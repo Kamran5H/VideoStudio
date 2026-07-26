@@ -1,0 +1,18 @@
+# AI Video Generation Studio — local requirements (pinned, verified working).
+# Python 3.11–3.14 on Windows/macOS/Linux. CPU-only is fine: generation runs on
+# free cloud GPUs (Colab worker / HF ZeroGPU); everything else runs locally.
+#
+# Install:  pip install -r requirements.txt
+# ffmpeg is bundled via imageio-ffmpeg — no separate install needed.
+
+gradio==6.19.0
+gradio_client==2.5.0
+edge-tts==7.2.8
+deep-translator==1.11.4
+imageio-ffmpeg==0.6.0
+pillow==11.3.0
+
+# torch is only used for local hardware detection (CUDA probe). The CPU build is
+# enough for the studio itself; a CUDA build is only needed if you later run
+# Wan2.1 locally on an NVIDIA GPU (see README "Run fully local").
+torch==2.12.0
