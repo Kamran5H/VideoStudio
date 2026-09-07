@@ -1,6 +1,9 @@
 *.pem
 *.key
 .env
+.env*
+*.env
+.keys.env
 *secret*
 *credential*
 studio_config.json

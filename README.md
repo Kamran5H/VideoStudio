@@ -1,180 +1,173 @@
-# 🎬 AI Video Generation Studio
+# 🎬 VideoStudio Pro — 4K AI Video & Storyboard Studio
+### 👑 Developer: Kamran Ashraf (Kami) · 💎 Gemini AI Pro Plan Connected · Zero-Billing Guaranteed
 
-A premium, single-window studio that turns a short text prompt into a finished
-video — cinematic prompt enhancement, **free** cloud-GPU generation, long-video
-stitching, AI voiceover, background music, and styled subtitles — with an endless
-crash-safe job queue.
-
-Everything runs locally **except the actual model inference**, which is delegated
-to free GPUs because this machine has no CUDA GPU (see *Why cloud* below).
+Welcome to **VideoStudio Pro**, the all-in-one cinematic AI Video Production Studio designed for effortless creation of ultra-realistic 4K AI diffusion videos, multi-scene storyboards, multilingual neural voiceovers, ambient music beds, and word-by-word karaoke subtitles with full crash-resilient auto-recovery!
 
 ---
 
-## 🚀 Launch (one command)
+## 📑 Table of Contents
+1. [🚀 Quick Start: How to Run Step-by-Step](#-quick-start-how-to-run-step-by-step)
+2. [🖥️ Studio Interface & Tab-by-Tab Guide](#-studio-interface--tab-by-tab-guide)
+   - [Tab 1: 🌟 4K AI Video (Text-to-Video Diffusion)](#tab-1--4k-ai-video)
+   - [Tab 2: 📜 Storyboard Director (Multi-Scene Movies)](#tab-2--storyboard-director)
+   - [Tab 3: ⚙️ Settings & System (Credentials, Hardware & Queue)](#tab-3--settings--system)
+3. [🛡️ Crash-Resilience & Auto-Resume Guide](#-crash-resilience--auto-resume-guide)
+4. [💎 Gemini AI Pro & Zero-Billing Architecture](#-gemini-ai-pro--zero-billing-architecture)
+5. [📁 Project Files & Output Folders](#-project-files--output-folders)
+6. [❓ Troubleshooting & Frequently Asked Questions](#-troubleshooting--frequently-asked-questions)
 
-```bash
-pip install -r requirements.txt
-python app.py
+---
+
+## 🚀 Quick Start: How to Run Step-by-Step
+
+You can launch VideoStudio Pro in any of these 3 easy ways:
+
+### 🌟 Option 1: One-Click Desktop Icon (Easiest)
+1. Go to your Windows **Desktop**.
+2. Double-click the golden cinema icon **`VideoStudio Pro - Kamran Ashraf.lnk`** (or double-click **`VideoStudio/Start Video Studio.bat`**).
+3. The server boots automatically and opens your web browser to:
+   ```
+   http://127.0.0.1:7860
+   ```
+
+---
+
+### 🌐 Option 2: Master Cloud Suite Portal
+1. In the main project folder, double-click **`Start Cloud Suite.bat`**.
+2. Open your browser to **`http://127.0.0.1:8080`**.
+3. In the Master Cloud Hub dashboard, click the glowing **"🎬 VideoStudio Pro"** card — it will automatically launch VideoStudio in the background and open the studio interface.
+
+---
+
+### 💻 Option 3: Command Line / Terminal
+Open PowerShell or Command Prompt in the project folder and run:
+```powershell
+python VideoStudio/app.py
 ```
-
-The studio opens in your browser at `http://127.0.0.1:7860`. That's it —
-**real AI video works out of the box** via the free LTX-Video backend
-(no account, no token, no setup). Type a prompt and hit Generate.
+Then visit **`http://127.0.0.1:7860`** in Microsoft Edge or Google Chrome.
 
 ---
 
-## 🆓 The free GPU backends (tried in this order, automatic fallback)
-
-Your laptop (Intel Iris Xe, no NVIDIA GPU, 8 GB RAM) **cannot** run video models
-locally — generation runs on free cloud GPUs:
-
-| Order | Backend | Setup needed | Notes |
-|-------|---------|--------------|-------|
-| 1 | **Colab worker (Wan2.1)** | run `colab_worker.ipynb`, paste URL | full Wan2.1 quality, most reliable |
-| 2 | **LTX-Video** ⭐ default | **none** | works anonymously, ~40 s per clip, 30 fps |
-| 3 | CogVideoX-5B | none | slower fallback, 720×480 |
-| 4 | **Wan2.1-14B official** | none | true 720p, free public queue (5–20 min/clip) |
-| 5 | Test pattern | — | **NOT AI** — disabled by default, heavily watermarked |
-
-**Long videos are continuous now:** each 5 s chunk is conditioned on the last
-frame of the previous chunk (image-to-video chaining), so a 30 s request is one
-coherent scene, not disconnected clips.
-
-**Quota handling — the queue never gives up and never fakes output.** Free
-anonymous GPU quota (LTX/CogVideoX) is limited per rolling window. When it runs
-out, the job **defers itself and auto-retries** when the window replenishes
-(queue card shows "⏳ auto-retry at HH:MM"); already-generated clips are kept, so
-a resume costs no extra quota. Meanwhile the Wan 14B official queue is unlimited
-but slow. Add a **free** Hugging Face token
-(<https://huggingface.co/settings/tokens> → **⚙️ Advanced → Backends**) to get
-much more ZeroGPU quota, or use the Colab worker for the fastest sessions.
-
-### Option A — Google Colab free T4 GPU  (full Wan2.1 quality)
-
-1. Open **`colab_worker.ipynb`** in [Google Colab](https://colab.research.google.com/).
-2. **Runtime → Change runtime type → T4 GPU**, then **Runtime → Run all**.
-3. Copy the `https://xxxxx.gradio.live` URL the last cell prints.
-4. In the studio: **⚙️ Advanced → 🔌 Backends & credentials → Colab worker URL** →
-   paste → **Save & refresh backends**.
-5. Keep the Colab tab open while generating. If it idles out, re-run the notebook
-   for a fresh URL.
-
-This runs the genuine **Wan2.1-T2V-1.3B** model on Colab's GPU — same quality as
-running it on your own RTX card, at zero cost.
-
-### Option B — Hugging Face ZeroGPU Space
-
-1. Get a free token at <https://huggingface.co/settings/tokens>.
-2. In the studio: **⚙️ Advanced → 🔌 Backends & credentials → Hugging Face token** →
-   paste → **Save & refresh backends**.
-
-The studio calls a public Wan Space on HF's free ZeroGPU pool. Availability and
-queue times depend on HF; Colab is more reliable, so it's tried first.
-
----
-
-## 🎛️ What every control does
-
-**Prompt panel** — paste an idea. **✨ Enhance Prompt** rewrites it into a rich
-cinematic prompt (camera, lens, lighting, color grade, motion, mood) using the
-chosen style preset; the result is shown for you to edit. *Auto-enhance* does this
-automatically at generate time. The **negative prompt** is added on top of smart
-defaults that suppress blur, flicker, artifacts, deformed anatomy and watermarks.
-
-**Format**
-- **Quality** — 480p / 720p / 1080p / 4K. Above 480p the video is generated at the
-  model's native size and **upscaled** (Lanczos locally, or higher quality on the
-  Colab worker). A VRAM/backend note appears under the selector.
-- **Aspect ratio** — 16:9 (YouTube), 9:16 (Reels/Shorts), 1:1 (Square),
-  21:9 (Cinematic), 4:3 (Classic).
-- **Duration** — 2–60 s. Above 5 s, **long-video stitching** turns on: the studio
-  generates multiple clips and crossfades them into one continuous video. The panel
-  tells you how many clips will be stitched.
-
-**Audio**
-- **AI voiceover** — free Microsoft neural voices in **English, Urdu, Hindi, Arabic,
-  Spanish, French, Chinese**; male/female/neutral; adjustable speed and volume.
-  Blank script = narrate the prompt. If narration is longer than the video, the last
-  frame is held so nothing gets cut off.
-- **Background music** — a mood bed (Ambient / Uplifting / Dramatic / Calm /
-  Energetic) that **auto-ducks** under the voiceover via sidechain compression. Drop
-  your own `music/<mood>.mp3` to override the built-in synth pad.
-
-**Subtitles**
-- Generate from the voiceover with **word-accurate timing**, or from the prompt.
-- **Translate** to a second language (free Google translation).
-- **Burn-in** styled captions (font, size, color, position, outline) **and** export
-  an external `.srt`. Off = `.srt` only.
-
-**⚙️ Advanced** — style preset, FPS, sampling steps, guidance scale, seed
-(-1 = random), frame interpolation (2× FPS), upscaler toggle, and the backend
-credentials panel.
-
-**Queue & progress** — every job shows a live animated bar with stage labels
-(Enhancing → Generating → Interpolating → Upscaling → Audio → Subtitles → Done),
-ETA, a **Pause** button, and per-job **Cancel** (paste the job id). Jobs run one
-after another forever and **survive restarts** — a crash mid-queue re-queues the
-job and continues.
-
-**Gallery** — finished videos as thumbnails; click to preview, **♻️ Regenerate**
-re-runs with the exact same seed, **📂 Open folder** opens `outputs/videos`.
-
-Every job also saves `outputs/jobs/<id>/settings.json` for exact reproduction.
-
----
-
-## 📁 Where things land
+## 🖥️ Studio Interface & Tab-by-Tab Guide
 
 ```
-D:\VideoStudio\
-├─ app.py                 # the UI — launch this
-├─ video_studio.py        # the whole backend (one file)
-├─ colab_worker.ipynb     # free Colab T4 GPU worker
-├─ requirements.txt       # pinned, verified
-├─ music/                 # drop <mood>.mp3 files here (optional)
-├─ outputs/
-│  ├─ videos/             # finished .mp4 files
-│  ├─ jobs/<id>/          # per-job settings.json, thumbnail, .srt
-│  ├─ queue/jobs.json     # persistent queue (crash recovery)
-│  └─ logs/studio.log     # rotating structured log
-├─ Wan2.1-main/           # the original Wan2.1 model code (reference / local use)
-└─ _TRASH_REVIEW/         # nothing deleted — see DELETION_LIST.md
++-----------------------------------------------------------------------------------------------+
+|  🎬 VideoStudio Pro [4K Ultra HD]              [👑 Kami] [💎 Pro Plan Connected · Zero-Billing]  |
++-----------------------------------------------------------------------------------------------+
+| [🌟 4K AI Video]           [📜 Storyboard Director]              [⚙️ Settings & System]         |
++-----------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 🔧 Troubleshooting
+### Tab 1: 🌟 4K AI Video
+*Generate ultra-crisp, high-definition AI diffusion video clips from text prompts.*
 
-| Symptom | Fix |
-|---------|-----|
-| **Video is a gradient with red "TEST CLIP" text** | No cloud GPU was reachable — check internet, add a free HF token, or start the Colab worker. The queue card names the backend used per job. |
-| **First jobs work, later ones fall back to TEST CLIP** | Free anonymous GPU quota for the day is used up. Add a free HF token (raises quota) or use the Colab worker. |
-| **"No generation backend available"** | Start `colab_worker.ipynb` and paste its URL, or add an HF token, or leave the test-pattern fallback on (Advanced). |
-| **Colab URL stopped working** | Free Colab sessions idle-out. Re-run the notebook (`Runtime → Run all`) and paste the new `*.gradio.live` URL. |
-| **Colab: `CUDA out of memory`** | Use a shorter duration or 480p; the worker already offloads to fit the T4. The studio also auto-retries once at lower resolution on OOM. |
-| **Colab: model download is slow** | First run pulls ~17 GB of weights into the session — normal; it's cached for that session. |
-| **No sound in the output** | Enable **AI voiceover** and/or **Background music** in the Audio panel. Without either, the video is silent by design. |
-| **Subtitles not showing on the video** | Turn on **Burn into video**. Otherwise only the `.srt` is written (in `outputs/jobs/<id>/`). |
-| **`ffmpeg not found`** | It's bundled via `imageio-ffmpeg`; just `pip install -r requirements.txt`. |
-| **Non-English voice sounds wrong / silent** | Pick the matching **Language** in the Audio panel so the correct neural voice is used. |
-| **Port 7860 in use** | Close the other Gradio app, or edit the `launch()` call at the bottom of `app.py` to add `server_port=7861`. |
-| **Unicode/emoji crash in console** | Already handled — the app forces UTF-8 on stdout/stderr. |
-
----
-
-## 🖥️ Run fully local (only if you get an NVIDIA GPU)
-
-If you move this to a machine with ≥8 GB CUDA VRAM, you can skip the cloud:
-install a CUDA build of PyTorch, download the weights into `Wan2.1-main/`, and the
-`HardwareProbe` will report `Local Wan2.1 capable: True`. (A local backend adapter
-can then be added to `video_studio.py` mirroring `ColabBackend`.) On this laptop
-that path is not available, which is why cloud GPUs are the default.
+#### Step-by-Step Workflow:
+1. **Template Presets (Optional)**: Choose from the `💡 Load Template Preset` dropdown (*Golden Eagle 4K, Cyberpunk Chase, Deep Space, Ocean Kingdom, اردو سینما*) to instantly populate settings.
+2. **Enter Your Concept**: Type your scene description into **Prompt / Creative Vision**.
+3. **`[✨ Enhance with AI]`**: Click this button! Gemini Pro rewrites your prompt with professional 35mm cinema lens optics, volumetric lighting, and color grading.
+4. **Core Essentials**:
+   - **Quality Tier**: `4K Ultra HD` (default), `1080p`, or `720p`.
+   - **Aspect Ratio**: `16:9` (default YouTube/TV), `9:16` (TikTok/Reels/Shorts), `1:1` (Square/Instagram).
+   - **Style Preset**: *Cinematic, Anime, Cyberpunk, Photorealistic, Hyper-realistic, Fantasy, 3D Render, Vintage Film, Horror Dark, Documentary*.
+   - **Duration**: Choose from 2 to 60 seconds (chained with crossfading for long clips).
+5. **Drawer 1: 🎙️ Voiceover, Music & Subtitles (Optional)**:
+   - Voiceover narration script (neural actor speaks this text).
+   - Language (*Urdu, English, Punjabi, Hindi, Arabic, Spanish, etc.*) and Voice (*Male / Female*).
+   - Background Music Mood (*Ambient, Dramatic, Uplifting, Calm, Energetic, None*).
+   - Burn Styled Subtitles (*Classic White, Neon Glow, Gold Luxury*).
+6. **Drawer 2: ⚙️ Advanced Parameters (Optional)**:
+   - Negative prompt, 60 FPS motion interpolation, Anti-fingerprint filter, Seed, and Branding watermark.
+7. **Action & Viewport**:
+   - Click **`[🚀 Generate 4K AI Video]`** to start rendering.
+   - Watch live progress in the **4K Cinema Viewport** and click **`[📂 Open Videos Folder]`** when finished.
 
 ---
 
-## Why a local web UI (not PyQt6)
+### Tab 2: 📜 Storyboard Director
+*Turn an idea or script into a complete multi-scene documentary or story with automatic voiceovers, stock footage, AI artwork, and subtitles.*
 
-Generation already talks to cloud GPUs over HTTP, and video preview needs a real
-media pipeline. A local Gradio app gives premium glass/gradient styling via CSS,
-plays videos natively, runs cross-platform, and launches with one command — with
-no heavy native GUI dependency. PyQt6 would add weight for no benefit here.
+#### Step-by-Step Workflow:
+1. **Templates**: Pick a story preset (*Ancient Pyramids, Quantum AI, Deep Ocean, اردو سبق آموز کہانی*).
+2. **Topic / Concept**: Enter a topic and scene count (2 to 10 scenes).
+3. **`[✨ Direct Script with AI]`**: Gemini Pro automatically scripts the entire sequence with `Visual:` and `VO:` directions.
+4. **Visual Style & Voice**: Set aesthetic, aspect ratio, narration language, and voice actor.
+5. **Action**: Click **`[🎬 Build 4K Storyboard Movie]`** to assemble the final documentary with voiceovers, subtitles, and soundtrack.
+
+---
+
+### Tab 3: ⚙️ Settings & System
+*Manage API credentials, check local and cloud hardware, and monitor queue history.*
+
+- **Cloud GPU & AI Credentials**: Configure your Gemini Pro API key, Google Colab Worker URL, Pexels/Pixabay stock keys, and Hugging Face ZeroGPU token.
+- **Hardware & Backend Status**: Live connection indicators for Colab T4, LTX-Video, CogVideoX, and Wan2.1.
+- **Job Queue & Recovery**: One-click recovery of interrupted renders and real-time execution logs.
+
+---
+
+## 🛡️ Crash-Resilience & Auto-Resume Guide
+
+### What happens if your laptop turns off, sleeps, or the browser closes?
+1. **Atomic Checkpointing**:
+   - Each individual video chunk (`chunk_00.mp4`, `chunk_01.mp4`), storyboard scene (`scene_01.mp4`), voiceover clip, and subtitle track is saved to disk as soon as it completes.
+2. **Auto-Recovery on Startup**:
+   - When you start VideoStudio Pro again, it automatically scans for any interrupted jobs.
+   - It **resumes immediately from the exact scene or stage where it stopped**, reusing already-rendered clips without repeating them!
+3. **Explicit User Termination**:
+   - Jobs will **never disappear or terminate on their own**.
+   - If a cloud GPU rate limit or network glitch occurs, the system automatically pauses and retries with exponential backoff.
+   - A job will only stop when it reaches `Stage.DONE` (100% complete) or when you explicitly click **`[🛑 Cancel / Stop Job]`**.
+
+---
+
+## 💎 Gemini AI Pro & Zero-Billing Architecture
+
+| Feature | How It Operates | Billing / Token Cost |
+| :--- | :--- | :--- |
+| **Gemini Pro Director** | Uses `gemini-2.5-flash` / `gemini-1.5-flash` via your connected Pro Plan | **$0.00 / Zero API Tokens** |
+| **Nano Banana 4K Frames** | Generates photorealistic scenes via Pollinations Flux engine | **$0.00 / Unlimited Free** |
+| **LTX / Wan2.1 Diffusion** | Hugging Face ZeroGPU + Google Colab T4 Worker | **$0.00 / Zero Cost** |
+| **Multilingual Voiceover** | Microsoft Edge Neural TTS | **$0.00 / Unlimited Free** |
+| **Whisper Karaoke Subtitles** | Local word-boundary subtitle engine | **$0.00 / Zero Cost** |
+
+---
+
+## 📁 Project Files & Output Folders
+
+```
+VideoStudio/
+├── app.py                     # Modern Glassmorphic Web App (Gradio UI)
+├── video_studio.py            # Master Consolidated Engine & Crash Recovery Queue
+├── colab_worker.ipynb         # Google Colab T4 GPU Worker notebook
+├── requirements.txt           # Python library dependencies
+├── Start Video Studio.bat     # Windows batch launcher
+├── run_videostudio.vbs        # Silent background VBS launcher
+├── videostudio.ico            # 256x256 multi-resolution icon
+├── README.md                  # This complete user manual
+├── assets/                    # Watermarks, logos, and local test media
+└── outputs/
+    ├── videos/                # Master rendered .mp4 video files
+    ├── jobs/<job_id>/         # Saved checkpoints, scene clips, VO files, subtitles (.srt)
+    ├── queue/jobs.json        # Persistent crash-resilient queue database
+    └── logs/studio.log        # System execution logs
+```
+
+---
+
+## ❓ Troubleshooting & Frequently Asked Questions
+
+#### Q: How do I find my finished videos?
+> **Answer**: Go to Tab 4 (**Live Queue & Crash Recovery**) and click **`[📂 Open Videos Folder]`**, or navigate to `VideoStudio/outputs/videos/` in Windows Explorer.
+
+#### Q: Can I run VideoStudio without an internet connection?
+> **Answer**: Yes! Standalone TTS audio, synthetic ambient music pads, Ken Burns image animations, 60fps interpolation, 4K Lanczos upscaling, and test pattern rendering run 100% offline. Online access is only needed for cloud GPU diffusion and Pexels stock searches.
+
+#### Q: How do I stop a running job?
+> **Answer**: Click the red **`[🛑 Cancel / Stop Job]`** button in Tab 1 or Tab 2, or paste the Job ID into Tab 4 and click **`[🛑 Cancel Selected Job]`**.
+
+---
+
+### 👑 Credits
+**Engineered with Precision by Kamran Ashraf (Kami)**
+*VideoStudio Pro · Unified 4K AI Video & Storyboard Studio*

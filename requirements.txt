@@ -1,18 +1,16 @@
-# AI Video Generation Studio — local requirements (pinned, verified working).
-# Python 3.11–3.14 on Windows/macOS/Linux. CPU-only is fine: generation runs on
-# free cloud GPUs (Colab worker / HF ZeroGPU); everything else runs locally.
-#
-# Install:  pip install -r requirements.txt
-# ffmpeg is bundled via imageio-ffmpeg — no separate install needed.
+# VideoStudio Pro — Unified AI Video & Storyboard Studio
+# Python 3.10 - 3.14 on Windows / macOS / Linux
 
-gradio==6.19.0
-gradio_client==2.5.0
-edge-tts==7.2.8
-deep-translator==1.11.4
-imageio-ffmpeg==0.6.0
-pillow==11.3.0
+gradio>=5.0.0
+gradio_client>=1.0.0
+edge-tts>=6.1.0
+deep-translator>=1.11.0
+imageio-ffmpeg>=0.5.0
+pillow>=10.0.0
+requests>=2.31.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+gTTS>=2.4.0
 
-# No torch: GPU detection uses nvidia-smi (see HardwareProbe), so the studio has
-# zero heavyweight ML dependencies. All generation runs on free cloud GPUs. If
-# you later want to run Wan2.1 locally on an NVIDIA GPU, install a CUDA build of
-# torch separately (see README "Run fully local").
+# Optional GenAI acceleration:
+google-genai>=0.1.0
