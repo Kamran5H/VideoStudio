@@ -39,6 +39,7 @@ import sys
 import threading
 import time
 import uuid
+import zlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -168,6 +169,9 @@ class StudioConfig:
     default_steps: int = 30
     default_guidance: float = 6.0
     max_retries: int = 1
+    max_videos_kept: int = 100               # retention cap: older finished
+    # videos in outputs/videos are pruned on startup so a long-running studio
+    # never silently fills the disk (this machine is space-constrained)
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         path.write_text(json.dumps(dataclasses.asdict(self), indent=2), encoding="utf-8")
@@ -210,15 +214,23 @@ class HardwareProbe:
         self._probe()
 
     def _probe(self) -> None:
-        try:
-            import torch
-            self.has_cuda = torch.cuda.is_available()
-            if self.has_cuda:
-                props = torch.cuda.get_device_properties(0)
-                self.gpu_name = props.name
-                self.vram_gb = props.total_memory / 1e9
-        except Exception:                                             # noqa: BLE001
-            pass
+        # GPU detection via nvidia-smi — no torch dependency. torch was a ~2 GB
+        # install used only for this CUDA probe on a CPU-only machine.
+        smi = shutil.which("nvidia-smi")
+        if smi:
+            try:
+                proc = subprocess.run(
+                    [smi, "--query-gpu=name,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=10)
+                lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
+                if lines:
+                    name, _, mem = lines[0].partition(",")
+                    self.gpu_name = name.strip() or "GPU"
+                    self.vram_gb = float(mem.strip()) / 1024.0   # MiB → GiB
+                    self.has_cuda = True
+            except Exception:                                         # noqa: BLE001
+                pass
         try:
             if sys.platform == "win32":
                 import ctypes
@@ -241,13 +253,7 @@ class HardwareProbe:
         return self.has_cuda and self.vram_gb >= 8 and self.free_disk_gb >= 25
 
     def dtype_choice(self) -> str:
-        if not self.has_cuda:
-            return "float32"
-        try:
-            import torch
-            return "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
-        except Exception:                                             # noqa: BLE001
-            return "float16"
+        return "float16" if self.has_cuda else "float32"
 
     def vram_warning(self, quality: str) -> str:
         """Human warning for a requested quality tier."""
@@ -356,7 +362,10 @@ class PromptEngine:
         if not prompt:
             return prompt
         style = STYLE_PRESETS.get(preset, STYLE_PRESETS["Cinematic"])
-        rng = random.Random(seed if seed is not None else hash(prompt) & 0xFFFF)
+        # crc32 (not built-in hash()) — hash() is per-process randomized, so a
+        # given prompt must map to the same enhancement across restarts.
+        rng = random.Random(seed if seed is not None
+                            else zlib.crc32(prompt.encode("utf-8")))
         motion = rng.choice(_MOTION_HINTS)
         parts = [
             f"{style['prefix']} {prompt}.",
@@ -436,6 +445,12 @@ class QuotaExhausted(RuntimeError):
         self.reason = reason
 
 
+class CancelledJob(RuntimeError):
+    """Raised inside a backend when the user cancels mid-generation so a long
+    blocking wait (e.g. the Wan public queue) aborts promptly instead of
+    finishing first."""
+
+
 _TRANSIENT_MARKERS = (
     "getaddrinfo failed",        # DNS / internet down (WinError 11001)
     "connection", "reset by peer", "temporarily unavailable",
@@ -460,7 +475,8 @@ class GenerationBackend:
         raise NotImplementedError
 
     def generate(self, req: GenerationRequest, out_path: Path,
-                 progress: Callable[[str], None] = lambda m: None) -> Path:
+                 progress: Callable[[str], None] = lambda m: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Path:
         raise NotImplementedError
 
 
@@ -492,7 +508,8 @@ class ColabBackend(GenerationBackend):
         return self._client
 
     def generate(self, req: GenerationRequest, out_path: Path,
-                 progress: Callable[[str], None] = lambda m: None) -> Path:
+                 progress: Callable[[str], None] = lambda m: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Path:
         progress(f"Colab worker: generating {req.width}x{req.height}, "
                  f"{req.num_frames} frames, {req.steps} steps…")
         client = self._get_client()
@@ -545,7 +562,8 @@ class LTXSpaceBackend(GenerationBackend):
         return max((v // 32) * 32, 256)
 
     def generate(self, req: GenerationRequest, out_path: Path,
-                 progress: Callable[[str], None] = lambda m: None) -> Path:
+                 progress: Callable[[str], None] = lambda m: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Path:
         w, h = self._snap32(req.width), self._snap32(req.height)
         seconds = min(max(req.num_frames / req.fps, 1.0), self.MAX_SECONDS)
         client = self._get_client()
@@ -613,7 +631,8 @@ class CogVideoXBackend(GenerationBackend):
         return self._client
 
     def generate(self, req: GenerationRequest, out_path: Path,
-                 progress: Callable[[str], None] = lambda m: None) -> Path:
+                 progress: Callable[[str], None] = lambda m: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Path:
         progress("CogVideoX-5B: generating (720x480, ~6s, can take minutes)…")
         client = self._get_client()
         result = client.predict(
@@ -661,7 +680,8 @@ class WanOfficialBackend(GenerationBackend):
         return min(self.SIZES, key=lambda s: abs(size_ratio(s) - ratio))
 
     def generate(self, req: GenerationRequest, out_path: Path,
-                 progress: Callable[[str], None] = lambda m: None) -> Path:
+                 progress: Callable[[str], None] = lambda m: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Path:
         from gradio_client import Client
         if time.time() < self.cooldown_until:
             # Empirically the public queue times out for long stretches of the
@@ -681,6 +701,8 @@ class WanOfficialBackend(GenerationBackend):
         deadline = time.time() + self.MAX_WAIT
         poll_failures = 0
         while time.time() < deadline:
+            if cancelled():
+                raise CancelledJob("Cancelled while waiting in the Wan queue")
             time.sleep(self.POLL_SECONDS)
             try:
                 status = client.predict(api_name="/status_refresh")
@@ -752,7 +774,10 @@ class HFSpaceBackend(GenerationBackend):
         try:
             client = Client(space, hf_token=token, verbose=False)
         except TypeError:
-            os.environ.setdefault("HF_TOKEN", token or "")
+            # Only export a real token — setting HF_TOKEN="" would pin an empty
+            # value that a later real token can't override via setdefault.
+            if token:
+                os.environ["HF_TOKEN"] = token
             client = Client(space, verbose=False)
         api = client.view_api(return_format="dict", print_info=False)
         endpoints = {**api.get("named_endpoints", {})}
@@ -820,7 +845,8 @@ class HFSpaceBackend(GenerationBackend):
         return None
 
     def generate(self, req: GenerationRequest, out_path: Path,
-                 progress: Callable[[str], None] = lambda m: None) -> Path:
+                 progress: Callable[[str], None] = lambda m: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Path:
         last_error = "no space produced a video"
         for space in self.config.hf_spaces:
             try:
@@ -850,7 +876,8 @@ class TestPatternBackend(GenerationBackend):
         return True
 
     def generate(self, req: GenerationRequest, out_path: Path,
-                 progress: Callable[[str], None] = lambda m: None) -> Path:
+                 progress: Callable[[str], None] = lambda m: None,
+                 cancelled: Callable[[], bool] = lambda: False) -> Path:
         progress("Test pattern: rendering synthetic clip…")
         seconds = req.num_frames / req.fps
         seed = req.seed if req.seed >= 0 else random.randint(0, 9999)
@@ -1410,8 +1437,23 @@ class JobQueue:
                 owner = int(self._lock_path.read_text().strip() or 0)
                 if owner != os.getpid() and self._pid_alive(owner):
                     return False
-            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+                # Stale lock (dead owner) — clear it before recreating.
+                try:
+                    self._lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+            # O_CREAT|O_EXCL is atomic on Windows and POSIX: if two studio
+            # processes race to acquire, exactly one wins and the other sees
+            # FileExistsError instead of both believing they own the queue.
+            fd = os.open(str(self._lock_path),
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode("utf-8"))
+            finally:
+                os.close(fd)
             return True
+        except FileExistsError:
+            return False
         except Exception as exc:                                      # noqa: BLE001
             log.warning("Worker lock error (%s) — assuming ownership", exc)
             return True
@@ -1604,16 +1646,29 @@ class JobQueue:
                 job.finished = time.time()
                 log.error("Job %s failed: %s", job.id, exc, exc_info=True)
             finally:
+                # Drop the cancel flag once a job reaches a terminal state so
+                # the set doesn't grow unbounded over a long-running session.
+                if job.stage in (Stage.DONE, Stage.FAILED, Stage.CANCELLED):
+                    self._cancel_flags.discard(job.id)
                 with self._lock:
                     self._persist()
 
     def _make_progress(self, job: Job) -> Callable[[Stage, float, str], None]:
+        # The in-memory Job is always current (the UI reads it live via
+        # snapshot()); disk persistence only needs to survive a crash. Writing
+        # the whole queue to JSON on every sub-progress tick was heavy I/O under
+        # lock — throttle to stage changes plus at most once every 2s.
+        last = {"stage": None, "t": 0.0}
+
         def cb(stage: Stage, fraction: float, message: str) -> None:
             job.stage = stage
             job.progress = min(max(fraction, 0.0), 1.0)
             job.message = message
-            with self._lock:
-                self._persist()
+            now = time.time()
+            if stage != last["stage"] or now - last["t"] >= 2.0:
+                last["stage"], last["t"] = stage, now
+                with self._lock:
+                    self._persist()
         return cb
 
 
@@ -1648,8 +1703,37 @@ class VideoStudio:
         (out / "jobs").mkdir(parents=True, exist_ok=True)
         (out / "videos").mkdir(parents=True, exist_ok=True)
         MUSIC_DIR.mkdir(exist_ok=True)
+        self._prune_outputs()
         self.queue = JobQueue(self)
         log.info("Studio up. %s", self.hardware.summary())
+
+    def _prune_outputs(self) -> None:
+        """Keep only the newest `max_videos_kept` finished videos and drop the
+        per-job working directories they no longer need. Runs at startup so a
+        forever-running studio never silently fills a small disk."""
+        keep = max(int(self.config.max_videos_kept), 1)
+        videos_dir = Path(self.config.output_dir) / "videos"
+        jobs_dir = Path(self.config.output_dir) / "jobs"
+        try:
+            mp4s = sorted(videos_dir.glob("*.mp4"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+        except Exception as exc:                                      # noqa: BLE001
+            log.warning("Prune scan failed: %s", exc)
+            return
+        removed = 0
+        for old in mp4s[keep:]:
+            # Filenames are "<stamp>_<jobid>.mp4"; clear the matching job dir too.
+            job_id = old.stem.split("_")[-1]
+            try:
+                old.unlink()
+                removed += 1
+            except Exception:                                        # noqa: BLE001
+                continue
+            jdir = jobs_dir / job_id
+            if jdir.is_dir():
+                shutil.rmtree(jdir, ignore_errors=True)
+        if removed:
+            log.info("Pruned %d old video(s), keeping newest %d", removed, keep)
 
     # -- helpers -------------------------------------------------------------
 
@@ -1714,6 +1798,7 @@ class VideoStudio:
                 "No generation backend available. Start the Colab worker "
                 "(colab_worker.ipynb) or add a free HF token in Settings.")
         partial_note = ""
+        continuity_note = ""
         prev_frame: Optional[Path] = None
         quota_waits = 0
         sticky: Optional[GenerationBackend] = None   # backend that made clip 0
@@ -1725,7 +1810,12 @@ class VideoStudio:
                 return job
             chunk_secs = min(CHUNK_SECONDS, s.duration - i * CHUNK_SECONDS)
             if n_chunks > 1 and i > 0:
-                chunk_secs = min(chunk_secs + CROSSFADE_SECONDS, CHUNK_SECONDS)
+                # Each crossfade eats CROSSFADE_SECONDS of overlap when stitching.
+                # Add it back here (allowing the ceiling to rise by one crossfade)
+                # so the final video matches the requested duration instead of
+                # coming out (n_chunks-1)*crossfade short.
+                chunk_secs = min(chunk_secs + CROSSFADE_SECONDS,
+                                 CHUNK_SECONDS + CROSSFADE_SECONDS)
             req = GenerationRequest(
                 prompt=final_prompt,
                 negative_prompt=negative,
@@ -1777,10 +1867,18 @@ class VideoStudio:
                              f"{' (retry)' if attempt else ''}…")
                         be.generate(req, clip_path,
                                     lambda m: bump(Stage.GENERATING,
-                                                   (i + 0.5) / n_chunks, m))
+                                                   (i + 0.5) / n_chunks, m),
+                                    cancelled=cancelled)
                         job.backend_used = be.name
                         generated = True
                         break
+                    except CancelledJob:
+                        # User cancelled mid-generation — propagate cleanly so the
+                        # job ends as CANCELLED rather than retrying/failing.
+                        job.stage = Stage.CANCELLED
+                        job.message = "Cancelled"
+                        job.finished = time.time()
+                        return job
                     except Exception as exc:                          # noqa: BLE001
                         log.warning("Backend %s clip %d attempt %d failed: %s",
                                     be.name, i, attempt, exc)
@@ -1855,6 +1953,13 @@ class VideoStudio:
                     prev_frame = None
             bump(Stage.GENERATING, (i + 1) / n_chunks,
                  f"Clip {i+1}/{n_chunks} done")
+        # Honesty: only backends with frame conditioning (LTX i2v) chain clips
+        # into a truly continuous scene. Anything else produces independent
+        # clips of the same prompt joined by crossfades — say so.
+        if (n_chunks > 1 and sticky is not None
+                and not sticky.supports_image_conditioning):
+            continuity_note = (f"ℹ {n_chunks} independent clips crossfaded "
+                               f"({sticky.name} has no frame continuity)")
         done_weight += STAGE_WEIGHTS[Stage.GENERATING]
 
         # 3. Stitch -------------------------------------------------------------
@@ -1952,6 +2057,8 @@ class VideoStudio:
                        f"{pretty.get(job.backend_used, job.backend_used)}")
         if partial_note:
             job.message = f"{job.message} | {partial_note}"
+        if continuity_note:
+            job.message = f"{job.message} | {continuity_note}"
         log.info("Job %s complete → %s", job.id, final.name)
         return job
 
@@ -1978,7 +2085,46 @@ class VideoStudio:
 # Smoke test:  python video_studio.py --smoke
 # ----------------------------------------------------------------------------
 
+def _probe_backends(studio: "VideoStudio") -> int:
+    """Try a tiny 1s generation on each active backend and report pass/fail.
+
+    The studio depends on third-party HF Spaces whose APIs can change or vanish
+    without notice; run this (python video_studio.py --probe) to detect a broken
+    backend before a real job silently falls through to the next one.
+    """
+    import tempfile
+    chain = studio.active_backends()
+    if not chain:
+        print("No active backends. Add a Colab URL or HF token first.")
+        return 1
+    req = GenerationRequest(prompt="a calm blue ocean at sunset",
+                            width=832, height=480,
+                            num_frames=studio._frames_for(1.0), steps=12)
+    failures = 0
+    for be in chain:
+        print(f"\n=== Probing {be.name} ({be.description}) ===")
+        t0 = time.time()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                out = Path(td) / "probe.mp4"
+                be.generate(req, out, lambda m: print(f"  … {m}"))
+                dur = ffprobe_duration(out) if out.exists() else 0.0
+                if out.exists() and dur > 0.1:
+                    print(f"  ✓ OK — {dur:.1f}s clip in {time.time()-t0:.0f}s")
+                else:
+                    print("  ✗ FAILED — backend returned no usable video")
+                    failures += 1
+        except Exception as exc:                                     # noqa: BLE001
+            print(f"  ✗ FAILED after {time.time()-t0:.0f}s — "
+                  f"{type(exc).__name__}: {str(exc)[:200]}")
+            failures += 1
+    print(f"\nProbe complete: {len(chain)-failures}/{len(chain)} backend(s) OK")
+    return 1 if failures else 0
+
+
 if __name__ == "__main__":
+    if "--probe" in sys.argv:
+        sys.exit(_probe_backends(VideoStudio()))
     if "--smoke" in sys.argv:
         studio = VideoStudio()
         print(studio.hardware.summary())

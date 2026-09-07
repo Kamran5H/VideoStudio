@@ -16,6 +16,7 @@ gain here.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import webbrowser
@@ -251,6 +252,24 @@ def render_gallery():
             for it in items if it.get("thumb") or it.get("video")]
 
 
+_gallery_sig: tuple = ()
+
+
+def render_gallery_if_changed():
+    """Timer-friendly gallery render: only push a new value when the set of
+    finished videos actually changes. Replacing the whole gallery every 1.5s
+    forced browsers to reload every thumbnail and could reset the video player
+    mid-preview."""
+    global _gallery_sig
+    items = STUDIO.gallery()
+    sig = tuple((it["id"], it.get("thumb"), it.get("video")) for it in items)
+    if sig == _gallery_sig:
+        return gr.update()
+    _gallery_sig = sig
+    return [(it["thumb"] or it["video"], f"#{it['id']} · seed {it['seed']}")
+            for it in items if it.get("thumb") or it.get("video")]
+
+
 def gallery_meta() -> list[dict]:
     return STUDIO.gallery()
 
@@ -270,8 +289,9 @@ def regenerate_selected(video_path):
     for job in STUDIO.queue.snapshot():
         if job.output_video == video_path or Path(job.output_video or "").name == \
                 Path(video_path).name:
-            s = job.settings
-            s.seed = job.actual_seed          # lock the seed for reproduction
+            # Copy the settings — never mutate the original job's object, or the
+            # two jobs would alias one JobSettings and share later edits.
+            s = dataclasses.replace(job.settings, seed=job.actual_seed)
             STUDIO.queue.submit(s)
             return gr.update(value=f"♻️ Regenerating #{job.id} at seed {job.actual_seed}."), \
                 render_queue()
@@ -482,8 +502,11 @@ def build_ui() -> gr.Blocks:
         prompt.change(count_chars, prompt, char_count)
         enhance_btn.click(do_enhance, [prompt, style_preset, seed], enhanced)
         quality.change(quality_warning, quality, quality_warn)
+        # Slider drives the live duration note on every move, but only syncs the
+        # number box on release — using .change both ways made the two controls
+        # echo each other's updates in a feedback loop.
         duration.change(duration_note, duration, duration_info)
-        duration.change(lambda v: v, duration, duration_num)
+        duration.release(lambda v: v, duration, duration_num)
         duration_num.change(lambda v: v, duration_num, duration)
         duration_num.change(duration_note, duration_num, duration_info)
 
@@ -512,7 +535,7 @@ def build_ui() -> gr.Blocks:
         # live refresh loop (queue + gallery) every 1.5s
         timer = gr.Timer(1.5)
         timer.tick(render_queue, None, queue_html)
-        timer.tick(lambda: render_gallery(), None, gallery)
+        timer.tick(render_gallery_if_changed, None, gallery)
         timer.tick(gallery_meta, None, gallery_state)
 
     return demo

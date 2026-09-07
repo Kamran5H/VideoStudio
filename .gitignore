@@ -3,6 +3,8 @@
 .env
 *secret*
 *credential*
+studio_config.json
+*.token
 *.pkl
 *.db
 *.log
