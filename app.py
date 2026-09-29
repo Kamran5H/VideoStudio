@@ -8,6 +8,7 @@ Opens at: http://127.0.0.1:7860
 
 from __future__ import annotations
 
+import html
 import os
 import subprocess
 import sys
@@ -534,10 +535,41 @@ def duration_hint(sec) -> str:
     return (f"<span style='color:#38BDF8;font-size:0.82rem;'>🎞️ {int(float(sec))}s 4K · "
             f"{n} AI shots chained & crossfaded</span>")
 
+def job_progress_percent(progress: float) -> int:
+    try:
+        return max(0, min(100, int(float(progress) * 100)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+def render_job_card(job_id: str, prompt: str, stage: Stage, progress: float, message: str, elapsed: Optional[int] = None) -> str:
+    pct = job_progress_percent(progress)
+    icon = STAGE_ICONS.get(stage, "•")
+    color = "#10B981" if stage == Stage.DONE else "#EF4444" if stage in (Stage.FAILED, Stage.CANCELLED) else "#38BDF8"
+    elapsed_html = f"<span style='float:right; opacity:0.7;'>⏱️ {max(0, elapsed)}s</span>" if elapsed is not None else ""
+    safe_job_id = html.escape(str(job_id))
+    safe_prompt = html.escape(str(prompt)[:40])
+    safe_stage = html.escape(stage.value)
+    safe_message = html.escape(str(message))
+    return f"""
+    <div class="q-card">
+      <div class="q-head">
+        <span class="q-prompt"><b>[{safe_job_id}]</b> {safe_prompt}</span>
+        <span class="q-stage" style="color:{color}; font-weight:800;">{icon} {safe_stage} ({pct}%)</span>
+      </div>
+      <div class="q-bar"><div class="q-fill" style="width:{pct}%;"></div></div>
+      <div style="margin-top:6px; font-size:0.84rem; color:#CBD5E1;">
+        {safe_message} {elapsed_html}
+      </div>
+    </div>
+    """
+
 def generate_ai_video_live(
     prompt, negative, preset, quality, aspect, duration, language, gender,
     custom_script, music, burn_subs, sub_style, tr_lang, interp_60, anti_fp, watermark, seed
 ):
+    if not STUDIO.queue.is_worker:
+        yield "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only.", "<div class='q-card'>Queue is read-only in this instance.</div>", None, None, ""
+        return
     if not prompt.strip():
         yield "⚠️ Please enter a prompt first.", "<div class='q-card'><b>Enter a prompt</b> to generate 4K video.</div>", None, None, ""
         return
@@ -571,23 +603,16 @@ def generate_ai_video_live(
             time.sleep(1.0)
             continue
 
-        pct = int(status.progress * 100)
-        icon = STAGE_ICONS.get(status.stage, "•")
-        color = "#10B981" if status.stage == Stage.DONE else "#EF4444" if status.stage in (Stage.FAILED, Stage.CANCELLED) else "#38BDF8"
+        pct = job_progress_percent(status.progress)
         elapsed = int(time.time() - start_t)
-
-        card_html = f"""
-        <div class="q-card">
-          <div class="q-head">
-            <span class="q-prompt"><b>[{job_id}]</b> {status.settings.prompt[:40] if status.settings else 'Job'}</span>
-            <span class="q-stage" style="color:{color}; font-weight:800;">{icon} {status.stage.value} ({pct}%)</span>
-          </div>
-          <div class="q-bar"><div class="q-fill" style="width:{pct}%;"></div></div>
-          <div style="margin-top:6px; font-size:0.84rem; color:#CBD5E1;">
-            {status.message} <span style="float:right; opacity:0.7;">⏱️ {elapsed}s</span>
-          </div>
-        </div>
-        """
+        card_html = render_job_card(
+            job_id,
+            status.settings.prompt if status.settings else "Job",
+            status.stage,
+            status.progress,
+            status.message,
+            elapsed,
+        )
 
         if status.stage == Stage.DONE:
             v_out = status.video_path if (status.video_path and Path(status.video_path).exists()) else None
@@ -598,7 +623,7 @@ def generate_ai_video_live(
             yield f"🛑 Job Cancelled: {job_id}", card_html, None, None, job_id
             break
         elif status.stage == Stage.FAILED:
-            yield f"❌ Job Error: {status.error or 'Failed'}", card_html, None, None, job_id
+            yield f"❌ Job Error: {html.escape(str(status.error or 'Failed'))}", card_html, None, None, job_id
             break
 
         yield f"⏳ Rendering 4K ({pct}%)...", card_html, None, None, job_id
@@ -607,6 +632,9 @@ def generate_ai_video_live(
 def generate_storyboard_video_live(
     topic, script_text, preset, aspect, language, gender, music, burn_subs, sub_style, watermark, anti_fp
 ):
+    if not STUDIO.queue.is_worker:
+        yield "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only.", "<div class='q-card'>Queue is read-only in this instance.</div>", None, ""
+        return
     if not script_text.strip() and not topic.strip():
         yield "⚠️ Please enter a topic or script.", "<div class='q-card'><b>Enter a script</b> to build video.</div>", None, ""
         return
@@ -634,23 +662,16 @@ def generate_storyboard_video_live(
             time.sleep(1.0)
             continue
 
-        pct = int(status.progress * 100)
-        icon = STAGE_ICONS.get(status.stage, "•")
-        color = "#10B981" if status.stage == Stage.DONE else "#EF4444" if status.stage in (Stage.FAILED, Stage.CANCELLED) else "#38BDF8"
+        pct = job_progress_percent(status.progress)
         elapsed = int(time.time() - start_t)
-
-        card_html = f"""
-        <div class="q-card">
-          <div class="q-head">
-            <span class="q-prompt"><b>[{job_id}]</b> {status.settings.prompt[:40] if status.settings else 'Job'}</span>
-            <span class="q-stage" style="color:{color}; font-weight:800;">{icon} {status.stage.value} ({pct}%)</span>
-          </div>
-          <div class="q-bar"><div class="q-fill" style="width:{pct}%;"></div></div>
-          <div style="margin-top:6px; font-size:0.84rem; color:#CBD5E1;">
-            {status.message} <span style="float:right; opacity:0.7;">⏱️ {elapsed}s</span>
-          </div>
-        </div>
-        """
+        card_html = render_job_card(
+            job_id,
+            status.settings.prompt if status.settings else "Job",
+            status.stage,
+            status.progress,
+            status.message,
+            elapsed,
+        )
 
         if status.stage == Stage.DONE:
             v_out = status.video_path if (status.video_path and Path(status.video_path).exists()) else None
@@ -660,19 +681,23 @@ def generate_storyboard_video_live(
             yield f"🛑 Storyboard Cancelled: {job_id}", card_html, None, job_id
             break
         elif status.stage == Stage.FAILED:
-            yield f"❌ Storyboard Error: {status.error or 'Failed'}", card_html, None, job_id
+            yield f"❌ Storyboard Error: {html.escape(str(status.error or 'Failed'))}", card_html, None, job_id
             break
 
         yield f"⏳ Building Storyboard ({pct}%)...", card_html, None, job_id
         time.sleep(1.0)
 
 def cancel_active_job_btn(job_id: str) -> str:
+    if not STUDIO.queue.is_worker:
+        return "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only."
     if not job_id:
         return "⚠️ No active job selected."
     success = STUDIO.queue.cancel(job_id)
     return f"🛑 Job [{job_id}] stopped." if success else f"Job [{job_id}] not found."
 
 def resume_all_interrupted_jobs_btn() -> str:
+    if not STUDIO.queue.is_worker:
+        return "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only."
     STUDIO.queue._auto_resume_interrupted_jobs()
     return "🔄 Interrupted jobs restored & resumed!"
 
@@ -725,19 +750,15 @@ def render_queue_table() -> str:
         return "<div class='q-card' style='font-size:0.86rem; color:#94A3B8;'>No jobs in queue. Submit a 4K Video or Storyboard to begin.</div>"
     cards = []
     for js in reversed(jobs[-8:]):
-        pct = int(js.progress * 100)
-        icon = STAGE_ICONS.get(js.stage, "•")
-        color = "#10B981" if js.stage == Stage.DONE else "#EF4444" if js.stage == Stage.CANCELLED else "#F59E0B" if js.stage == Stage.FAILED else "#38BDF8"
-        cards.append(f"""
-        <div class="q-card">
-          <div class="q-head">
-            <span class="q-prompt"><b>[{js.job_id}]</b> {js.settings.prompt[:40] if js.settings else 'Job'}</span>
-            <span class="q-stage" style="color:{color};">{icon} {js.stage.value} ({pct}%)</span>
-          </div>
-          <div class="q-bar"><div class="q-fill" style="width:{pct}%;"></div></div>
-          <div style="margin-top:6px; font-size:0.80rem; color:#94A3B8;">{js.message}</div>
-        </div>
-        """)
+        cards.append(
+            render_job_card(
+                js.job_id,
+                js.settings.prompt if js.settings else "Job",
+                js.stage,
+                js.progress,
+                js.message,
+            )
+        )
     return "".join(cards)
 
 # ---------------------------------------------------------------------------

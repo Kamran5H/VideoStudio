@@ -1,24 +1,16 @@
 ' VideoStudio Pro — Resilient Background Launcher
 Option Explicit
 
-Dim WshShell, fso, q, appDir, py, logPath, cmdLine, i, candidates, cand
+Dim WshShell, fso, q, appDir, py, logPath, cmdLine, i
 q = Chr(34)
 Set WshShell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 appDir = fso.GetParentFolderName(WScript.ScriptFullName)
 If Not fso.FileExists(appDir & "\app.py") Then
-    candidates = Array( _
-        "C:\Users\chkam\OneDrive\Desktop\BrandFinder\VideoStudio", _
-        "C:\Users\chkam\OneDrive\Desktop\VideoStudio", _
-        "C:\Users\chkam\Desktop\BrandFinder\VideoStudio" _
-    )
-    For Each cand In candidates
-        If fso.FileExists(cand & "\app.py") Then
-            appDir = cand
-            Exit For
-        End If
-    Next
+    MsgBox "VideoStudio app.py was not found next to this launcher:" & vbCrLf & appDir, _
+           vbExclamation, "VideoStudio Pro"
+    WScript.Quit 1
 End If
 
 logPath = appDir & "\outputs\logs\launch.log"
@@ -41,7 +33,7 @@ If ServerUp() Then
   WScript.Quit
 End If
 
-py = "C:\Users\chkam\AppData\Local\Programs\Python\Python314\python.exe"
+py = appDir & "\.venv\Scripts\python.exe"
 If Not fso.FileExists(py) Then py = "python.exe"
 
 If Not fso.FolderExists(appDir & "\outputs") Then fso.CreateFolder(appDir & "\outputs")

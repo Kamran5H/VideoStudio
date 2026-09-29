@@ -1404,10 +1404,10 @@ class SubtitleEngine:
             return out_path
 
         def fmt_time(seconds: float) -> str:
-            h = int(seconds // 3600)
-            m = int((seconds % 3600) // 60)
-            s = int(seconds % 60)
-            ms = int((seconds - int(seconds)) * 1000)
+            total_ms = max(0, round(seconds * 1000))
+            h, remainder = divmod(total_ms, 3_600_000)
+            m, remainder = divmod(remainder, 60_000)
+            s, ms = divmod(remainder, 1000)
             return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
         srt_lines = []
@@ -1750,11 +1750,17 @@ class JobQueue:
         except FileExistsError:
             return False
         except Exception as exc:
-            log.warning("Worker lock error (%s) — assuming ownership", exc)
-            return True
+            log.warning("Worker lock error (%s) — queue will remain view-only", exc)
+            return False
 
     def shutdown(self) -> None:
         self._running = False
+        worker = self._active_thread
+        if worker and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=5)
+            if worker.is_alive():
+                log.warning("Queue worker is still active; keeping its lock until process exit.")
+                return
         try:
             if (self.is_worker and self._lock_path.exists()
                     and self._lock_path.read_text().strip() == str(os.getpid())):
@@ -1802,6 +1808,8 @@ class JobQueue:
         """Recover and continue any job interrupted by a shutdown/crash/browser
         close. Only the worker-owning instance resumes; failed jobs stay failed
         (a fresh retry is an explicit user action via the Retry/Resume button)."""
+        if not self.is_worker:
+            return
         has_pending = False
         with self._lock:
             for j_id, js in self._jobs.items():
@@ -1852,6 +1860,10 @@ class JobQueue:
         log.warning("Queue persist failed after retries: %s", last)
 
     def submit(self, settings: JobSettings) -> str:
+        if not self.is_worker:
+            raise RuntimeError(
+                "This studio is view-only because another instance owns the job queue."
+            )
         status = JobStatus(job_id=settings.job_id, settings=settings)
         with self._lock:
             if settings.job_id in self._cancelled_jobs:
@@ -1863,6 +1875,8 @@ class JobQueue:
 
     def cancel(self, job_id: str) -> bool:
         """Explicit user termination of a job."""
+        if not self.is_worker:
+            return False
         with self._lock:
             self._cancelled_jobs.add(job_id)
             js = self._jobs.get(job_id)
@@ -1881,6 +1895,8 @@ class JobQueue:
         return js is not None and js.stage == Stage.CANCELLED
 
     def retry(self, job_id: str) -> bool:
+        if not self.is_worker:
+            return False
         with self._lock:
             if job_id in self._cancelled_jobs:
                 self._cancelled_jobs.remove(job_id)
@@ -2318,14 +2334,30 @@ class VideoStudio:
 
             scene_video = job_dir / f"scene_{s_idx:02d}.mp4"
             vo_path = job_dir / f"vo_scene_{s_idx:02d}.mp3"
+            metadata_path = job_dir / f"scene_{s_idx:02d}.json"
 
             # Checkpoint recovery: If scene already rendered, skip generation
-            if scene_video.exists() and ffprobe_duration(scene_video) > 0.5:
-                log.info("Checkpoint: Reusing rendered scene %s for job %s", scene_video.name, sett.job_id)
-                scene_clips.append(scene_video)
-                if vo_path.exists():
+            if scene_video.exists() and ffprobe_duration(scene_video) > 0.5 and vo_path.exists():
+                checkpoint = self._read_scene_checkpoint(metadata_path)
+                if checkpoint is not None:
+                    events, vo_dur = checkpoint
+                    log.info("Checkpoint: Reusing rendered scene %s for job %s", scene_video.name, sett.job_id)
+                    scene_clips.append(scene_video)
                     vo_files.append(vo_path)
-                continue
+                    all_events.extend(
+                        {
+                            "text": ev["text"],
+                            "offset": ev["offset"] + current_offset,
+                            "duration": ev["duration"],
+                        }
+                        for ev in events
+                    )
+                    current_offset += vo_dur
+                    continue
+                log.warning(
+                    "Scene checkpoint metadata missing or invalid for %s; regenerating scene",
+                    scene_video.name,
+                )
 
             prog = 0.20 + 0.45 * (s_idx / len(scenes))
             progress_cb(sett.job_id, Stage.GENERATING, prog, f"Processing scene {s_idx+1}/{len(scenes)}...")
@@ -2344,7 +2376,6 @@ class VideoStudio:
                     "offset": ev["offset"] + current_offset,
                     "duration": ev["duration"]
                 })
-            current_offset += scene_dur
             vo_files.append(vo_path)
 
             # Fetch visual asset
@@ -2362,6 +2393,15 @@ class VideoStudio:
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", str(scene_video)
                 ])
 
+            actual_scene_duration = ffprobe_duration(scene_video)
+            if actual_scene_duration <= 0.5:
+                raise RuntimeError(f"Scene render produced an invalid video: {scene_video}")
+            current_offset += vo_dur
+            self._write_scene_checkpoint(
+                metadata_path,
+                events,
+                vo_dur,
+            )
             scene_clips.append(scene_video)
 
         if self.queue.is_cancelled(sett.job_id):
@@ -2430,6 +2470,48 @@ class VideoStudio:
             thumbnail_path=str(thumb),
             backend_used="script_story_engine",
         )
+
+    @staticmethod
+    def _read_scene_checkpoint(path: Path) -> Optional[Tuple[List[dict], float]]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            events = data["events"]
+            duration = float(data["voiceover_duration"])
+            if not isinstance(events, list) or not math.isfinite(duration) or duration < 0:
+                return None
+            validated_events = []
+            for event in events:
+                if not isinstance(event, dict) or not isinstance(event.get("text"), str):
+                    return None
+                offset = float(event["offset"])
+                event_duration = float(event["duration"])
+                if (
+                    not math.isfinite(offset)
+                    or not math.isfinite(event_duration)
+                    or offset < 0
+                    or event_duration < 0
+                ):
+                    return None
+                validated_events.append(
+                    {
+                        "text": event["text"],
+                        "offset": offset,
+                        "duration": event_duration,
+                    }
+                )
+            return validated_events, duration
+        except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            return None
+
+    @staticmethod
+    def _write_scene_checkpoint(path: Path, events: List[dict], voiceover_duration: float) -> None:
+        payload = json.dumps(
+            {"events": events, "voiceover_duration": voiceover_duration},
+            ensure_ascii=False,
+        )
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(payload, encoding="utf-8")
+        temp_path.replace(path)
 
     def _parse_script_scenes(self, script: str) -> List[Tuple[str, str]]:
         scenes = []
