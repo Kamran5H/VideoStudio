@@ -1693,7 +1693,8 @@ class JobQueue:
         self.queue_file = DEFAULT_OUTPUT_DIR / "queue" / "jobs.json"
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()          # re-entrant: _save() is called
-        # from inside methods that already hold the lock
+        # from inside methods that already hold the lock. Queue writes stay
+        # under this lock too, so concurrent snapshots cannot share a temp file.
         self._jobs: Dict[str, JobStatus] = {}
         self._cancelled_jobs: set[str] = set()
         self._active_thread: Optional[threading.Thread] = None
@@ -1848,16 +1849,16 @@ class JobQueue:
                     "not_before": js.not_before,
                 }
             payload = json.dumps(data, indent=2)
-        tmp = self.queue_file.with_suffix(f".{os.getpid()}.tmp")
-        for attempt in range(5):
-            try:
-                tmp.write_text(payload, encoding="utf-8")
-                tmp.replace(self.queue_file)      # atomic
-                return
-            except (PermissionError, OSError) as exc:
-                time.sleep(0.2 * (attempt + 1))
-                last = exc
-        log.warning("Queue persist failed after retries: %s", last)
+            tmp = self.queue_file.with_suffix(f".{os.getpid()}.tmp")
+            for attempt in range(5):
+                try:
+                    tmp.write_text(payload, encoding="utf-8")
+                    tmp.replace(self.queue_file)      # atomic
+                    return
+                except (PermissionError, OSError) as exc:
+                    time.sleep(0.2 * (attempt + 1))
+                    last = exc
+            log.warning("Queue persist failed after retries: %s", last)
 
     def submit(self, settings: JobSettings) -> str:
         if not self.is_worker:

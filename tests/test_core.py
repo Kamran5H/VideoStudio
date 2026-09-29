@@ -1,4 +1,6 @@
 import json
+import os
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,11 +11,11 @@ from app import (
     DRAFT_DEFAULTS,
     clear_browser_draft,
     draft_field_save_js,
-    job_progress_percent,
     readable_job_message,
     render_job_card,
     restore_browser_draft,
     restore_selected_tab_js,
+    studio_navbar_html,
     sync_restored_job_outputs,
 )
 from video_studio import (
@@ -162,6 +164,13 @@ class VideoStudioCoreTests(unittest.TestCase):
         self.assertNotIn("42%", card)
         self.assertIn("is-indeterminate", card)
 
+    def test_shared_navbar_displays_gold_developer_attribution_once(self):
+        navbar = studio_navbar_html("<span class='badge-chip badge-pro'>Connected</span>")
+        self.assertEqual(navbar.count("Developer: Kamran Ashraf"), 1)
+        self.assertIn("badge-kami", navbar)
+        self.assertIn("#FCD34D", app.CSS)
+        self.assertIn("@media (max-width: 640px)", app.CSS)
+
     def test_browser_draft_restore_validates_values_and_never_includes_credentials(self):
         values = restore_browser_draft(
             json.dumps(
@@ -269,11 +278,30 @@ class VideoStudioCoreTests(unittest.TestCase):
                 self.assertEqual(repeated[3], app.gr.skip())
                 self.assertEqual(repeated[8], str(video))
 
-    def test_invalid_progress_is_safe(self):
-        self.assertEqual(job_progress_percent(float("nan")), 0)
-        self.assertEqual(job_progress_percent("invalid"), 0)
-        self.assertEqual(job_progress_percent(-0.5), 0)
-        self.assertEqual(job_progress_percent(2), 100)
+    def test_generation_status_does_not_claim_unmeasured_percentages(self):
+        queue = app.STUDIO.queue
+        status = JobStatus(
+            job_id="active",
+            stage=Stage.GENERATING,
+            progress=0.42,
+            message="Generating AI clip 2/4...",
+            settings=JobSettings(job_id="active", prompt="A rendering video"),
+        )
+        with (
+            patch.object(queue, "submit", return_value="active"),
+            patch.object(queue, "get_status", return_value=status),
+            patch.object(queue, "all_jobs", return_value=[status]),
+            patch.object(app.time, "sleep"),
+        ):
+            update = next(
+                app.generate_ai_video_live(
+                    "A rendering video", "", "Cinematic", "4K", "16:9", 6,
+                    "English", "Female", "", "Ambient", True, "Classic White",
+                    "None", False, True, False, -1,
+                )
+            )
+        self.assertEqual(update[0], "⏳ Rendering 4K in progress...")
+        self.assertNotIn("%", update[0])
         self.assertEqual(Stage.from_str("FAILED"), Stage.FAILED)
 
     def test_view_only_queue_rejects_mutations(self):
@@ -296,6 +324,81 @@ class VideoStudioCoreTests(unittest.TestCase):
             queue._lock_path.write_text("not-a-process-id", encoding="utf-8")
             self.assertFalse(queue._acquire_worker_lock())
             self.assertEqual(queue._lock_path.read_text(encoding="utf-8"), "not-a-process-id")
+
+    def test_concurrent_queue_saves_serialize_shared_temp_file_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = object.__new__(JobQueue)
+            queue.queue_file = Path(tmp) / "jobs.json"
+            queue._lock = threading.RLock()
+            queue._last_persist = 0.0
+            status = JobStatus(
+                job_id="saved",
+                message="first snapshot",
+                settings=JobSettings(job_id="saved"),
+            )
+            queue._jobs = {"saved": status}
+
+            temp_path = queue.queue_file.with_suffix(f".{os.getpid()}.tmp")
+            first_write_started = threading.Event()
+            second_call_started = threading.Event()
+            second_write_started = threading.Event()
+            release_first_write = threading.Event()
+            writer_lock = threading.Lock()
+            write_count = 0
+            write_errors = []
+            original_write_text = Path.write_text
+
+            def controlled_write_text(path, data, *args, **kwargs):
+                nonlocal write_count
+                if path == temp_path:
+                    with writer_lock:
+                        write_count += 1
+                        current_write = write_count
+                    if current_write == 1:
+                        first_write_started.set()
+                        if not release_first_write.wait(timeout=5):
+                            raise TimeoutError("Timed out waiting to release the first queue write.")
+                    else:
+                        second_write_started.set()
+                return original_write_text(path, data, *args, **kwargs)
+
+            def save():
+                try:
+                    queue._save(force=True)
+                except Exception as exc:
+                    write_errors.append(exc)
+
+            def save_newer():
+                second_call_started.set()
+                try:
+                    with queue._lock:
+                        status.message = "second snapshot"
+                        queue._save(force=True)
+                except Exception as exc:
+                    write_errors.append(exc)
+
+            with patch.object(Path, "write_text", controlled_write_text):
+                first = threading.Thread(target=save)
+                first.start()
+                self.assertTrue(first_write_started.wait(timeout=2))
+
+                second = threading.Thread(target=save_newer)
+                second.start()
+                self.assertTrue(second_call_started.wait(timeout=2))
+                self.assertFalse(second_write_started.wait(timeout=0.2))
+
+                release_first_write.set()
+                first.join(timeout=2)
+                second.join(timeout=2)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(write_errors, [])
+            self.assertTrue(second_write_started.is_set())
+            self.assertEqual(
+                json.loads(queue.queue_file.read_text(encoding="utf-8"))["saved"]["message"],
+                "second snapshot",
+            )
 
 
 if __name__ == "__main__":
