@@ -1,14 +1,14 @@
 @echo off
 title VideoStudio Pro - 4K AI Video ^& Storyboard Studio
-cd /d "C:\Users\chkam\OneDrive\Desktop\BrandFinder\VideoStudio"
+cd /d "%~dp0"
 
 echo ================================================================
 echo   VideoStudio Pro - 4K AI Video ^& Storyboard Studio
 echo   Crafted by Kamran Ashraf (Kami)
 echo ================================================================
 
-rem --- pick a real Python (no PATH guesswork) ---
-set "PY=C:\Users\chkam\AppData\Local\Programs\Python\Python314\python.exe"
+rem --- prefer the project's virtual environment, then use system Python ---
+set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
 rem --- already running? just open the browser and exit ---

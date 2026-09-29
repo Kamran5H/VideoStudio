@@ -101,6 +101,16 @@ python app.py
 # Or double-click "Start Video Studio.bat" on Windows
 ```
 
+## 🧪 Verification
+
+Run the offline verification suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+`test_gemini_features.py` and `test_verify.py` are opt-in live smoke checks; they may use network services, API quota, and local media processing, so they are not run during automated test discovery.
+
 ---
 
 ## 📜 License

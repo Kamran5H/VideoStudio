@@ -27,9 +27,9 @@ import warnings
 warnings.filterwarnings("ignore", message=".*numpy.*")
 warnings.filterwarnings("ignore", category=UserWarning)
 
-from video_generator import Veo3FreeVideoEngine, FreeLLMPromptEnhancer
-
 def main():
+    from video_generator import Veo3FreeVideoEngine, FreeLLMPromptEnhancer
+
     parser = argparse.ArgumentParser(description="Free VEO 3 AI Video Generator Test")
     parser.add_argument("prompt", type=str, nargs="?", default="A glowing futuristic starship sailing through a purple nebula, 8k cinematic masterpiece", help="Text prompt for video generation")
     parser.add_argument("--aspect", type=str, default="16:9", choices=["16:9", "9:16", "1:1"], help="Aspect Ratio")
