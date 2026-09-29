@@ -9,6 +9,8 @@ Opens at: http://127.0.0.1:7860
 from __future__ import annotations
 
 import html
+import json
+import math
 import os
 import subprocess
 import sys
@@ -21,7 +23,7 @@ import gradio as gr
 from video_studio import (
     ASPECT_SIZES, DEFAULT_OUTPUT_DIR, LANG_CODES, MUSIC_MOODS, QUALITY_TIERS,
     STYLE_PRESETS, SUBTITLE_STYLES, TTS_VOICES, AudioEngine, FreeLLMPromptEnhancer,
-    HardwareProbe, JobSettings, PromptEngine, Stage, StudioConfig, SubtitleEngine,
+    HardwareProbe, JobSettings, JobStatus, PromptEngine, Stage, StudioConfig, SubtitleEngine,
     VideoEngine, VideoStudio, log, log_queue,
 )
 
@@ -403,6 +405,54 @@ label, span.label-text, .block-title, label span {
   box-shadow: 0 0 10px rgba(56, 189, 248, 0.6);
 }
 
+.q-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0 6px;
+  color: #CBD5E1;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.q-progress-track {
+  height: 12px;
+  background: rgba(255, 255, 255, 0.11);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.q-progress-track .q-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #38BDF8, #6366F1, #A855F7);
+  border-radius: inherit;
+  transition: width 0.4s ease;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.55);
+}
+
+.q-progress-track.is-indeterminate .q-progress-fill {
+  width: 38% !important;
+  background: linear-gradient(90deg, #6366F1, #38BDF8, #A855F7);
+  animation: q-progress-wait 1.5s ease-in-out infinite alternate;
+}
+
+.q-progress-track.is-terminal .q-progress-fill {
+  width: 0;
+}
+
+@keyframes q-progress-wait {
+  from { transform: translateX(-20%); }
+  to { transform: translateX(180%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .q-progress-track.is-indeterminate .q-progress-fill {
+    animation: none;
+    width: 100% !important;
+  }
+}
+
 /* Hardware & System Status Badges */
 .hw-badge {
   display: block;
@@ -500,6 +550,174 @@ STORY_TEMPLATE_MAP = {
     "🇵🇰 اردو سبق آموز کہانی — ہمت کا راستہ": "urdu_motivation",
 }
 
+DRAFT_STORAGE_KEY = "videostudio.draft.v1"
+HEAD_JS = f"""<script>
+window.__videoStudioDraftReady = false;
+document.addEventListener("click", function (event) {{
+  if (!window.__videoStudioDraftReady || !event.isTrusted) return;
+  const tab = event.target.closest("#studio-tabs [role=tab]");
+  if (!tab) return;
+  const tabs = Array.from(document.querySelectorAll("#studio-tabs [role=tab]"));
+  const selected = ["ai", "story", "settings"][tabs.indexOf(tab)];
+  if (!selected) return;
+  try {{
+    const key = {json.dumps(DRAFT_STORAGE_KEY)};
+    const draft = JSON.parse(sessionStorage.getItem(key) || "{{}}");
+    draft.selected_tab = selected;
+    sessionStorage.setItem(key, JSON.stringify(draft));
+  }} catch (error) {{
+    console.error("VideoStudio could not save the selected tab.", error);
+  }}
+}}, true);
+</script>"""
+DRAFT_DEFAULTS = {
+    "ai_template": AI_TEMPLATE_CHOICES[0],
+    "ai_prompt": DEMO_AI_PRESETS["eagle"][0],
+    "ai_quality": "4K",
+    "ai_aspect": "16:9",
+    "ai_style": "Cinematic",
+    "ai_duration": 6,
+    "ai_script": DEMO_AI_PRESETS["eagle"][6],
+    "ai_language": "English",
+    "ai_gender": "Female",
+    "ai_music": "Ambient",
+    "ai_subtitles": True,
+    "ai_subtitle_style": "Classic White",
+    "ai_translate_language": "None",
+    "ai_negative": "",
+    "ai_interpolate": False,
+    "ai_anti_fingerprint": True,
+    "ai_watermark": False,
+    "ai_seed": -1,
+    "story_template": STORY_TEMPLATE_CHOICES[0],
+    "story_topic": DEMO_STORY_PRESETS["pyramids"][0],
+    "story_scenes": 3,
+    "story_script": DEMO_STORY_PRESETS["pyramids"][1],
+    "story_style": "Cinematic",
+    "story_aspect": "16:9",
+    "story_language": "English",
+    "story_gender": "Male",
+    "story_music": "Dramatic",
+    "story_subtitles": True,
+    "story_subtitle_style": "Neon Glow",
+    "story_anti_fingerprint": True,
+    "story_watermark": False,
+}
+DRAFT_CHOICES = {
+    "ai_template": AI_TEMPLATE_CHOICES,
+    "ai_quality": QUALITY_TIERS,
+    "ai_aspect": list(ASPECT_SIZES.keys()),
+    "ai_style": STYLES_LIST,
+    "ai_language": LANGUAGES,
+    "ai_gender": ["Male", "Female"],
+    "ai_music": MUSIC_MOODS,
+    "ai_subtitle_style": SUB_STYLES_LIST,
+    "ai_translate_language": SUBTITLE_LANGS,
+    "story_template": STORY_TEMPLATE_CHOICES,
+    "story_style": STYLES_LIST,
+    "story_aspect": list(ASPECT_SIZES.keys()),
+    "story_language": LANGUAGES,
+    "story_gender": ["Male", "Female"],
+    "story_music": MUSIC_MOODS,
+    "story_subtitle_style": SUB_STYLES_LIST,
+}
+DRAFT_BOOLEAN_KEYS = {
+    "ai_subtitles", "ai_interpolate", "ai_anti_fingerprint", "ai_watermark",
+    "story_subtitles", "story_anti_fingerprint", "story_watermark",
+}
+DRAFT_NUMERIC_BOUNDS = {
+    "ai_duration": (2, 60, 1),
+    "ai_seed": (-1, 2**31 - 1, 1),
+    "story_scenes": (2, 10, 1),
+}
+DRAFT_TEXT_LIMITS = {
+    "ai_prompt": 10000,
+    "ai_script": 20000,
+    "ai_negative": 5000,
+    "story_topic": 5000,
+    "story_script": 50000,
+}
+
+def restore_browser_draft(payload: str) -> tuple:
+    try:
+        data = json.loads(payload) if isinstance(payload, str) else {}
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    values = []
+    for key, default in DRAFT_DEFAULTS.items():
+        value = data.get(key, default)
+        if key in DRAFT_CHOICES:
+            value = value if value in DRAFT_CHOICES[key] else default
+        elif key in DRAFT_BOOLEAN_KEYS:
+            value = value if isinstance(value, bool) else default
+        elif key in DRAFT_NUMERIC_BOUNDS:
+            minimum, maximum, _step = DRAFT_NUMERIC_BOUNDS[key]
+            try:
+                number = float(value)
+                value = int(round(number)) if math.isfinite(number) else default
+                value = max(minimum, min(maximum, value))
+            except (TypeError, ValueError, OverflowError):
+                value = default
+        elif key in DRAFT_TEXT_LIMITS:
+            value = value[:DRAFT_TEXT_LIMITS[key]] if isinstance(value, str) else default
+        values.append(value)
+
+    return tuple(values)
+
+def clear_browser_draft() -> tuple:
+    return tuple(DRAFT_DEFAULTS.values())
+
+def clear_browser_draft_btn() -> tuple:
+    return (*clear_browser_draft(), "Saved draft cleared. Jobs and videos are unchanged.")
+
+def draft_field_save_js(key: str) -> str:
+    storage_key = json.dumps(DRAFT_STORAGE_KEY)
+    field_key = json.dumps(key)
+    return (
+        "(value) => { try { const draft = JSON.parse(sessionStorage.getItem("
+        f"{storage_key}) || '{{}}'); draft[{field_key}] = value; "
+        f"sessionStorage.setItem({storage_key}, JSON.stringify(draft)); "
+        "} catch (error) { console.error('VideoStudio could not save this draft field.', error); } "
+        "return value; }"
+    )
+
+def draft_save_all_js() -> str:
+    storage_key = json.dumps(DRAFT_STORAGE_KEY)
+    keys = json.dumps(list(DRAFT_DEFAULTS))
+    return (
+        f"(...values) => {{ try {{ const draft = JSON.parse(sessionStorage.getItem({storage_key}) || '{{}}'); "
+        f"const keys = {keys}; keys.forEach((key, index) => draft[key] = values[index]); "
+        f"sessionStorage.setItem({storage_key}, JSON.stringify(draft)); "
+        "} catch (error) { console.error('VideoStudio could not save the draft.', error); } "
+        "return values; }"
+    )
+
+def restore_selected_tab_js() -> str:
+    storage_key = json.dumps(DRAFT_STORAGE_KEY)
+    return (
+        f"() => {{ try {{ const draft = JSON.parse(sessionStorage.getItem({storage_key}) || '{{}}'); "
+        "const tab = typeof draft.selected_tab === 'string' ? draft.selected_tab : 'ai'; "
+        "const index = ({ai: 0, story: 1, settings: 2})[tab] ?? 0; let attempts = 0; "
+        "const restore = () => { const buttons = document.querySelectorAll('#studio-tabs [role=tab]'); "
+        "if (buttons.length < 3) { if (attempts++ < 120) requestAnimationFrame(restore); "
+        "else console.error('VideoStudio tabs did not load; could not restore selected tab.'); return; } "
+        "buttons[index].click(); window.__videoStudioDraftReady = true; }; restore(); "
+        "} catch (error) { console.error('VideoStudio could not restore the selected tab.', error); } }"
+    )
+
+def select_tab_js() -> str:
+    return (
+        "(tab) => { const index = ({ai: 0, story: 1, settings: 2})[tab] ?? 0; "
+        "const button = document.querySelectorAll('#studio-tabs [role=tab]')[index]; "
+        "try { const key = 'videostudio.draft.v1'; const draft = JSON.parse(sessionStorage.getItem(key) || '{}'); "
+        "draft.selected_tab = tab; sessionStorage.setItem(key, JSON.stringify(draft)); } "
+        "catch (error) { console.error('VideoStudio could not save the selected tab.', error); } "
+        "if (button) button.click(); return tab; }"
+    )
+
 def load_ai_template(selected_label: str):
     key = AI_TEMPLATE_MAP.get(selected_label)
     if not key:
@@ -541,27 +759,250 @@ def job_progress_percent(progress: float) -> int:
     except (TypeError, ValueError, OverflowError):
         return 0
 
-def render_job_card(job_id: str, prompt: str, stage: Stage, progress: float, message: str, elapsed: Optional[int] = None) -> str:
-    pct = job_progress_percent(progress)
+def queue_wait_label(job: JobStatus, jobs: List[JobStatus], now: Optional[float] = None) -> str:
+    if job.stage != Stage.QUEUED:
+        return ""
+    current_time = time.time() if now is None else now
+    if job.not_before > current_time:
+        wait = int(job.not_before - current_time)
+        minutes, seconds = divmod(wait, 60)
+        hours, minutes = divmod(minutes, 60)
+        retry_in = f"{hours}h {minutes}m" if hours else f"{minutes}m {seconds:02d}s"
+        return f"Retry window in {retry_in}"
+
+    ahead = 0
+    for previous in jobs:
+        if previous.job_id == job.job_id:
+            break
+        if previous.stage in (Stage.DONE, Stage.FAILED, Stage.CANCELLED):
+            continue
+        if previous.stage != Stage.QUEUED or previous.not_before <= current_time:
+            ahead += 1
+    position = ahead + 1
+    return "Next in line" if position == 1 else f"Queue position {position} · {ahead} ahead"
+
+def render_job_card(
+    job_id: str,
+    prompt: str,
+    stage: Stage,
+    progress: float,
+    message: str,
+    elapsed: Optional[int] = None,
+    wait_label: str = "",
+    error: Optional[str] = None,
+) -> str:
     icon = STAGE_ICONS.get(stage, "•")
     color = "#10B981" if stage == Stage.DONE else "#EF4444" if stage in (Stage.FAILED, Stage.CANCELLED) else "#38BDF8"
     elapsed_html = f"<span style='float:right; opacity:0.7;'>⏱️ {max(0, elapsed)}s</span>" if elapsed is not None else ""
+    is_queued = stage == Stage.QUEUED
     safe_job_id = html.escape(str(job_id))
     safe_prompt = html.escape(str(prompt)[:40])
     safe_stage = html.escape(stage.value)
-    safe_message = html.escape(str(message))
+    safe_message = html.escape(redact_sensitive_text(message))
+    safe_error = html.escape(redact_sensitive_text(error or ""))
+    is_complete = stage == Stage.DONE
+    is_terminal = stage in (Stage.DONE, Stage.FAILED, Stage.CANCELLED)
+    is_indeterminate = stage != Stage.QUEUED and not is_terminal
+    if is_complete:
+        progress_label, progress_value = "Completed", "100%"
+    elif is_queued:
+        progress_label = html.escape(wait_label) if wait_label else "Waiting for the worker"
+        progress_value = "—"
+    elif is_terminal:
+        progress_label, progress_value = "Not completed", "—"
+    else:
+        progress_label, progress_value = "Current step", "In progress"
+    progress_class = (
+        "q-progress-track is-indeterminate"
+        if is_queued or is_indeterminate
+        else "q-progress-track is-terminal"
+        if stage in (Stage.FAILED, Stage.CANCELLED)
+        else "q-progress-track"
+    )
+    if is_queued:
+        progress_aria = 'role="progressbar" aria-label="Waiting for a worker"'
+    elif is_indeterminate:
+        progress_aria = f'role="progressbar" aria-label="{html.escape(stage.value)} in progress"'
+    elif is_complete:
+        progress_aria = 'role="progressbar" aria-label="Completed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"'
+    else:
+        progress_aria = f'role="progressbar" aria-label="{html.escape(stage.value)} not completed"'
+    progress_style = ' style="width:100%;"' if is_complete else ""
+    error_html = (
+        f"<details style='margin-top:8px; color:#FCA5A5;'><summary>Technical error details</summary>"
+        f"<pre style='white-space:pre-wrap; overflow-wrap:anywhere;'>{safe_error}</pre></details>"
+        if error and safe_error
+        else ""
+    )
     return f"""
     <div class="q-card">
       <div class="q-head">
         <span class="q-prompt"><b>[{safe_job_id}]</b> {safe_prompt}</span>
-        <span class="q-stage" style="color:{color}; font-weight:800;">{icon} {safe_stage} ({pct}%)</span>
+        <span class="q-stage" style="color:{color}; font-weight:800;">{icon} {safe_stage}</span>
       </div>
-      <div class="q-bar"><div class="q-fill" style="width:{pct}%;"></div></div>
-      <div style="margin-top:6px; font-size:0.84rem; color:#CBD5E1;">
+      <div class="q-progress-meta">
+        <span>{progress_label}</span>
+        <span>{progress_value}</span>
+      </div>
+      <div class="{progress_class}" {progress_aria}><div class="q-progress-fill"{progress_style}></div></div>
+      <div style="margin-top:9px; font-size:0.9rem; color:#E2E8F0;">
         {safe_message} {elapsed_html}
       </div>
+      {error_html}
     </div>
     """
+
+def redact_sensitive_text(value: str) -> str:
+    safe = str(value)
+    for secret in (
+        STUDIO.config.gemini_api_key,
+        STUDIO.config.hf_token,
+        STUDIO.config.pexels_api_key,
+        STUDIO.config.pixabay_api_key,
+    ):
+        if secret:
+            safe = safe.replace(secret, "[redacted]")
+    return safe
+
+def current_job_status() -> Optional[JobStatus]:
+    jobs = STUDIO.queue.all_jobs()
+    if not jobs:
+        return None
+    in_progress = [
+        job for job in jobs
+        if job.stage not in (Stage.QUEUED, Stage.DONE, Stage.FAILED, Stage.CANCELLED)
+    ]
+    if in_progress:
+        return in_progress[0]
+    queued = [job for job in jobs if job.stage == Stage.QUEUED]
+    if queued:
+        return queued[0]
+    return max(
+        jobs,
+        key=lambda job: job.settings.created_at if job.settings else 0,
+    )
+
+def latest_completed_job(mode: Optional[str] = None) -> Optional[JobStatus]:
+    completed = [
+        job for job in STUDIO.queue.all_jobs()
+        if job.stage == Stage.DONE
+        and (mode is None or (job.settings and job.settings.mode == mode))
+        and job.video_path
+        and Path(job.video_path).is_file()
+    ]
+    return max(
+        completed,
+        key=lambda job: job.settings.created_at if job.settings else 0,
+        default=None,
+    )
+
+def readable_job_message(job: JobStatus) -> str:
+    if job.stage == Stage.FAILED:
+        return "This job could not finish. Expand the details to see the technical error."
+    if job.stage == Stage.QUEUED and job.error:
+        return "A temporary error occurred. The job will retry; expand for technical details."
+    return job.message
+
+def open_current_job_tab() -> str:
+    job = current_job_status()
+    if job is None or job.stage in (Stage.DONE, Stage.FAILED, Stage.CANCELLED):
+        job = latest_completed_job()
+    if job and job.settings and job.settings.mode == "script_story":
+        return "story"
+    return "ai"
+
+def render_current_job_panel() -> str:
+    job = current_job_status()
+    if not job:
+        return (
+            "<div class='q-card'><b>No video jobs yet.</b> Your submitted jobs and "
+            "results will appear here and keep running if you refresh this page.</div>"
+        )
+
+    elapsed = max(0, int(time.time() - job.settings.created_at)) if job.settings else None
+    wait_label = queue_wait_label(job, STUDIO.queue.all_jobs())
+    message = readable_job_message(job)
+    return render_job_card(
+        job.job_id,
+        job.settings.prompt if job.settings else "Video job",
+        job.stage,
+        job.progress,
+        message,
+        elapsed,
+        wait_label,
+        job.error,
+    )
+
+def restored_job_outputs() -> tuple:
+    """Return job cards and the latest available result for each tab."""
+    selected = current_job_status()
+    ai_job = selected if selected and selected.settings and selected.settings.mode == "ai_video" else None
+    story_job = selected if selected and selected.settings and selected.settings.mode == "script_story" else None
+
+    def card_for(job: Optional[JobStatus], mode: str) -> str:
+        if job is None:
+            job = latest_completed_job(mode)
+        if job is None:
+            return "<div class='q-card'>No video has been generated in this tab yet.</div>"
+        message = readable_job_message(job)
+        elapsed = max(0, int(time.time() - job.settings.created_at)) if job.settings else None
+        return render_job_card(
+            job.job_id,
+            job.settings.prompt if job.settings else "Video job",
+            job.stage,
+            job.progress,
+            message,
+            elapsed,
+            queue_wait_label(job, STUDIO.queue.all_jobs()),
+            job.error,
+        )
+
+    ai_result = latest_completed_job("ai_video")
+    story_result = latest_completed_job("script_story")
+    ai_active_id = (
+        ai_job.job_id
+        if ai_job and ai_job.stage not in (Stage.DONE, Stage.FAILED, Stage.CANCELLED)
+        else ""
+    )
+    story_active_id = (
+        story_job.job_id
+        if story_job and story_job.stage not in (Stage.DONE, Stage.FAILED, Stage.CANCELLED)
+        else ""
+    )
+    return (
+        render_current_job_panel(),
+        card_for(ai_job, "ai_video"),
+        ai_result.video_path if ai_result else None,
+        ai_result.srt_path if ai_result and ai_result.srt_path and Path(ai_result.srt_path).is_file() else None,
+        ai_active_id,
+        card_for(story_job, "script_story"),
+        story_result.video_path if story_result else None,
+        story_active_id,
+    )
+
+def sync_restored_job_outputs(
+    last_ai_video: str = "",
+    last_ai_srt: str = "",
+    last_story_video: str = "",
+) -> tuple:
+    """Refresh statuses every tick, but reload media only when its path changes."""
+    panel, ai_card, ai_video, ai_srt, ai_id, story_card, story_video, story_id = restored_job_outputs()
+    ai_video_path = str(ai_video or "")
+    ai_srt_path = str(ai_srt or "")
+    story_video_path = str(story_video or "")
+    return (
+        panel,
+        ai_card,
+        ai_video if ai_video_path and ai_video_path != last_ai_video else gr.skip(),
+        ai_srt if ai_srt_path and ai_srt_path != last_ai_srt else gr.skip(),
+        ai_id,
+        story_card,
+        story_video if story_video_path and story_video_path != last_story_video else gr.skip(),
+        story_id,
+        ai_video_path or last_ai_video,
+        ai_srt_path or last_ai_srt,
+        story_video_path or last_story_video,
+    )
 
 def generate_ai_video_live(
     prompt, negative, preset, quality, aspect, duration, language, gender,
@@ -610,8 +1051,10 @@ def generate_ai_video_live(
             status.settings.prompt if status.settings else "Job",
             status.stage,
             status.progress,
-            status.message,
+            readable_job_message(status),
             elapsed,
+            queue_wait_label(status, STUDIO.queue.all_jobs()),
+            status.error,
         )
 
         if status.stage == Stage.DONE:
@@ -623,7 +1066,7 @@ def generate_ai_video_live(
             yield f"🛑 Job Cancelled: {job_id}", card_html, None, None, job_id
             break
         elif status.stage == Stage.FAILED:
-            yield f"❌ Job Error: {html.escape(str(status.error or 'Failed'))}", card_html, None, None, job_id
+            yield "❌ Job failed. See the shared status panel for technical details.", card_html, None, None, job_id
             break
 
         yield f"⏳ Rendering 4K ({pct}%)...", card_html, None, None, job_id
@@ -669,8 +1112,10 @@ def generate_storyboard_video_live(
             status.settings.prompt if status.settings else "Job",
             status.stage,
             status.progress,
-            status.message,
+            readable_job_message(status),
             elapsed,
+            queue_wait_label(status, STUDIO.queue.all_jobs()),
+            status.error,
         )
 
         if status.stage == Stage.DONE:
@@ -681,7 +1126,7 @@ def generate_storyboard_video_live(
             yield f"🛑 Storyboard Cancelled: {job_id}", card_html, None, job_id
             break
         elif status.stage == Stage.FAILED:
-            yield f"❌ Storyboard Error: {html.escape(str(status.error or 'Failed'))}", card_html, None, job_id
+            yield "❌ Storyboard job failed. See the shared status panel for technical details.", card_html, None, job_id
             break
 
         yield f"⏳ Building Storyboard ({pct}%)...", card_html, None, job_id
@@ -749,6 +1194,7 @@ def render_queue_table() -> str:
     if not jobs:
         return "<div class='q-card' style='font-size:0.86rem; color:#94A3B8;'>No jobs in queue. Submit a 4K Video or Storyboard to begin.</div>"
     cards = []
+    now = time.time()
     for js in reversed(jobs[-8:]):
         cards.append(
             render_job_card(
@@ -757,6 +1203,8 @@ def render_queue_table() -> str:
                 js.stage,
                 js.progress,
                 js.message,
+                max(0, int(now - js.settings.created_at)) if js.settings else None,
+                queue_wait_label(js, jobs, now),
             )
         )
     return "".join(cards)
@@ -789,14 +1237,25 @@ def build_app() -> gr.Blocks:
             </div>
             """)
 
+        job_progress_panel = gr.HTML(render_current_job_panel())
+        with gr.Row():
+            open_job_tab_btn = gr.Button("↗ Open current job/result", variant="secondary", scale=2)
+            clear_draft_btn = gr.Button("🧹 Clear saved draft", variant="secondary", scale=1)
+            clear_draft_msg = gr.Markdown("")
+        open_tab_target = gr.Textbox(value="ai", visible=False)
+
         active_job_id = gr.State("")
         story_active_job_id = gr.State("")
+        last_ai_video_path = gr.State("")
+        last_ai_srt_path = gr.State("")
+        last_story_video_path = gr.State("")
 
-        with gr.Tabs():
+        draft_payload = gr.Textbox(value="{}", visible=False)
+        with gr.Tabs(selected="ai", elem_id="studio-tabs") as studio_tabs:
             # =================================================================
             # TAB 1: 🌟 4K AI Video
             # =================================================================
-            with gr.Tab("🌟 4K AI Video"):
+            with gr.Tab("🌟 4K AI Video", id="ai"):
                 with gr.Row():
                     # Left Column: Creation Controls
                     with gr.Column(scale=6):
@@ -882,7 +1341,11 @@ def build_app() -> gr.Blocks:
                     outputs=[ai_prompt, ai_style, ai_quality, ai_aspect, ai_dur, ai_lang, ai_gender, ai_custom_script, ai_music, ai_sub_style]
                 )
                 ai_dur.change(duration_hint, inputs=[ai_dur], outputs=[ai_dur_hint])
-                enhance_btn.click(enhance_prompt_btn, inputs=[ai_prompt, ai_style], outputs=[ai_prompt])
+                enhance_event = enhance_btn.click(
+                    enhance_prompt_btn,
+                    inputs=[ai_prompt, ai_style],
+                    outputs=[ai_prompt],
+                )
                 ai_gen_btn.click(
                     generate_ai_video_live,
                     inputs=[
@@ -898,7 +1361,7 @@ def build_app() -> gr.Blocks:
             # =================================================================
             # TAB 2: 📜 Storyboard Director
             # =================================================================
-            with gr.Tab("📜 Storyboard Director"):
+            with gr.Tab("📜 Storyboard Director", id="story"):
                 with gr.Row():
                     # Left Column: Storyboard Creation
                     with gr.Column(scale=6):
@@ -968,7 +1431,11 @@ def build_app() -> gr.Blocks:
                     inputs=[story_template_pick],
                     outputs=[story_topic, story_script, story_style, story_aspect, story_lang, story_gender, story_music]
                 )
-                story_script_btn.click(generate_script_btn, inputs=[story_topic, story_scenes_cnt, story_lang], outputs=[story_script])
+                story_script_event = story_script_btn.click(
+                    generate_script_btn,
+                    inputs=[story_topic, story_scenes_cnt, story_lang],
+                    outputs=[story_script],
+                )
                 story_gen_btn.click(
                     generate_storyboard_video_live,
                     inputs=[
@@ -984,7 +1451,7 @@ def build_app() -> gr.Blocks:
             # =================================================================
             # TAB 3: ⚙️ Settings & System
             # =================================================================
-            with gr.Tab("⚙️ Settings & System"):
+            with gr.Tab("⚙️ Settings & System", id="settings"):
                 with gr.Row():
                     # Column 1: API Credentials
                     with gr.Column():
@@ -1034,9 +1501,115 @@ def build_app() -> gr.Blocks:
                 q_resume_btn.click(resume_all_interrupted_jobs_btn, outputs=[]).then(render_queue_table, outputs=[queue_card])
                 open_folder_btn.click(open_videos_folder)
 
+        draft_components = [
+            ai_template_pick, ai_prompt, ai_quality, ai_aspect, ai_style, ai_dur,
+            ai_custom_script, ai_lang, ai_gender, ai_music, ai_subs, ai_sub_style,
+            ai_tr_lang, ai_negative, ai_interp, ai_anti_fp, ai_watermark, ai_seed,
+            story_template_pick, story_topic, story_scenes_cnt, story_script,
+            story_style, story_aspect, story_lang, story_gender, story_music,
+            story_subs, story_sub_style, story_anti_fp, story_watermark,
+        ]
+        if len(draft_components) != len(DRAFT_DEFAULTS):
+            raise RuntimeError("Draft component registration does not match its saved schema.")
+
+        for key, component in zip(DRAFT_DEFAULTS, draft_components):
+            save_event = component.input if isinstance(component, gr.Textbox) else component.change
+            save_event(
+                fn=None,
+                inputs=[component],
+                js=draft_field_save_js(key),
+                queue=False,
+            )
+
+        ai_template_pick.change(
+            fn=None,
+            inputs=draft_components,
+            js=draft_save_all_js(),
+            queue=False,
+        )
+        story_template_pick.change(
+            fn=None,
+            inputs=draft_components,
+            js=draft_save_all_js(),
+            queue=False,
+        )
+        enhance_event.then(
+            fn=None,
+            inputs=draft_components,
+            js=draft_save_all_js(),
+            queue=False,
+        )
+        story_script_event.then(
+            fn=None,
+            inputs=draft_components,
+            js=draft_save_all_js(),
+            queue=False,
+        )
+
+        clear_draft_btn.click(
+            clear_browser_draft_btn,
+            outputs=[*draft_components, clear_draft_msg],
+            js=(
+                f"() => {{ try {{ const key = {json.dumps(DRAFT_STORAGE_KEY)}; "
+                "const draft = JSON.parse(sessionStorage.getItem(key) || '{}'); "
+                "const tab = ['ai', 'story', 'settings'].includes(draft.selected_tab) ? draft.selected_tab : 'ai'; "
+                "sessionStorage.setItem(key, JSON.stringify({selected_tab: tab})); }"
+                " catch (error) { console.error('VideoStudio could not clear the saved draft.', error); }"
+                " return []; }"
+            ),
+            queue=False,
+        )
+        open_job_tab_btn.click(
+            open_current_job_tab,
+            outputs=[open_tab_target],
+            queue=False,
+        ).then(
+            fn=None,
+            inputs=[open_tab_target],
+            js=select_tab_js(),
+            queue=False,
+        )
+
+        draft_restore_js = (
+            f"() => [sessionStorage.getItem({json.dumps(DRAFT_STORAGE_KEY)}) || '{{}}']"
+        )
+        draft_restore_event = app.load(
+            restore_browser_draft,
+            inputs=[draft_payload],
+            outputs=draft_components,
+            js=draft_restore_js,
+        )
+        draft_restore_event.then(
+            fn=None,
+            js=restore_selected_tab_js(),
+            queue=False,
+        )
+
+        job_state_outputs = [
+            job_progress_panel,
+            ai_live_card,
+            ai_video_player,
+            ai_srt_download,
+            active_job_id,
+            story_live_card,
+            story_video_player,
+            story_active_job_id,
+            last_ai_video_path,
+            last_ai_srt_path,
+            last_story_video_path,
+        ]
+        job_state_inputs = [
+            last_ai_video_path,
+            last_ai_srt_path,
+            last_story_video_path,
+        ]
+        app.load(sync_restored_job_outputs, inputs=job_state_inputs, outputs=job_state_outputs)
+
         # Background Timers for smooth live updates
         queue_timer = gr.Timer(3.0)
         queue_timer.tick(render_queue_table, None, queue_card)
+        job_timer = gr.Timer(2.0)
+        job_timer.tick(sync_restored_job_outputs, inputs=job_state_inputs, outputs=job_state_outputs)
         log_timer = gr.Timer(5.0)
         log_timer.tick(read_system_logs, None, log_box)
 
@@ -1054,6 +1627,7 @@ def launch_app(server_port: int = 7860):
         server_port=server_port,
         inbrowser=not managed,
         css=CSS,
+        head=HEAD_JS,
         show_error=True,
     )
 

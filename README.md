@@ -111,6 +111,12 @@ python -m unittest discover -s tests -v
 
 `test_gemini_features.py` and `test_verify.py` are opt-in live smoke checks; they may use network services, API quota, and local media processing, so they are not run during automated test discovery.
 
+## 🔄 Refresh & Job Recovery
+
+Submitted video jobs run in the local studio worker, not in the browser page. Refreshing the page reconnects to the saved job queue and restores its status and completed video; the current phase, queue position, or quota retry window is shown in the shared status panel above the tabs. Active work uses an indeterminate progress bar rather than an invented percentage or ETA. When no job is running, the latest completed result is reopened in the tab that created it.
+
+Creative form values and the selected tab are auto-saved in the current browser tab's session storage, so they survive a page refresh but are cleared when that browser tab session ends. Unsaved API-key edits are never stored in browser state. Use **Clear saved draft** to reset creative fields without cancelling jobs or removing videos.
+
 ---
 
 ## 📜 License
