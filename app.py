@@ -146,10 +146,22 @@ body, .gradio-container {
 }
 
 .badge-kami {
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(168, 85, 247, 0.15));
-  border-color: rgba(245, 158, 11, 0.45);
-  color: #FDE047;
-  box-shadow: 0 0 12px rgba(245, 158, 11, 0.25);
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.20), rgba(217, 119, 6, 0.10));
+  border-color: rgba(251, 191, 36, 0.58);
+  color: #FCD34D;
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  #studio-navbar {
+    padding: 8px 10px !important;
+  }
+
+  .badge-kami {
+    padding: 4px 9px;
+    font-size: 0.75rem;
+  }
 }
 
 .badge-pro {
@@ -638,6 +650,22 @@ DRAFT_TEXT_LIMITS = {
     "story_script": 50000,
 }
 
+DEVELOPER_ATTRIBUTION = "Developer: Kamran Ashraf"
+
+def studio_navbar_html(gemini_chip: str) -> str:
+    return f"""
+    <div style="display:flex; align-items:center; justify-content:space-between; width:100%; flex-wrap:wrap; gap:10px;">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <span class="studio-logo">🎬 VideoStudio Pro</span>
+        <span class="badge-chip badge-4k">4K Ultra HD</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <span class="badge-chip badge-kami">{DEVELOPER_ATTRIBUTION}</span>
+        {gemini_chip}
+      </div>
+    </div>
+    """
+
 def restore_browser_draft(payload: str) -> tuple:
     try:
         data = json.loads(payload) if isinstance(payload, str) else {}
@@ -752,12 +780,6 @@ def duration_hint(sec) -> str:
         return "<span style='color:#64748B;font-size:0.82rem;'>⚡ Single 4K AI shot (≤5s)</span>"
     return (f"<span style='color:#38BDF8;font-size:0.82rem;'>🎞️ {int(float(sec))}s 4K · "
             f"{n} AI shots chained & crossfaded</span>")
-
-def job_progress_percent(progress: float) -> int:
-    try:
-        return max(0, min(100, int(float(progress) * 100)))
-    except (TypeError, ValueError, OverflowError):
-        return 0
 
 def queue_wait_label(job: JobStatus, jobs: List[JobStatus], now: Optional[float] = None) -> str:
     if job.stage != Stage.QUEUED:
@@ -1044,7 +1066,6 @@ def generate_ai_video_live(
             time.sleep(1.0)
             continue
 
-        pct = job_progress_percent(status.progress)
         elapsed = int(time.time() - start_t)
         card_html = render_job_card(
             job_id,
@@ -1069,7 +1090,7 @@ def generate_ai_video_live(
             yield "❌ Job failed. See the shared status panel for technical details.", card_html, None, None, job_id
             break
 
-        yield f"⏳ Rendering 4K ({pct}%)...", card_html, None, None, job_id
+        yield "⏳ Rendering 4K in progress...", card_html, None, None, job_id
         time.sleep(1.0)
 
 def generate_storyboard_video_live(
@@ -1105,7 +1126,6 @@ def generate_storyboard_video_live(
             time.sleep(1.0)
             continue
 
-        pct = job_progress_percent(status.progress)
         elapsed = int(time.time() - start_t)
         card_html = render_job_card(
             job_id,
@@ -1129,7 +1149,7 @@ def generate_storyboard_video_live(
             yield "❌ Storyboard job failed. See the shared status panel for technical details.", card_html, None, job_id
             break
 
-        yield f"⏳ Building Storyboard ({pct}%)...", card_html, None, job_id
+        yield "⏳ Building Storyboard in progress...", card_html, None, job_id
         time.sleep(1.0)
 
 def cancel_active_job_btn(job_id: str) -> str:
@@ -1224,18 +1244,7 @@ def build_app() -> gr.Blocks:
 
         # Slim High-End Studio Top Bar
         with gr.Group(elem_id="studio-navbar"):
-            gr.HTML(f"""
-            <div style="display:flex; align-items:center; justify-content:space-between; width:100%; flex-wrap:wrap; gap:10px;">
-              <div style="display:flex; align-items:center; gap:12px;">
-                <span class="studio-logo">🎬 VideoStudio Pro</span>
-                <span class="badge-chip badge-4k">4K Ultra HD</span>
-              </div>
-              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                <span class="badge-chip badge-kami">👑 Kami</span>
-                {gemini_chip}
-              </div>
-            </div>
-            """)
+            gr.HTML(studio_navbar_html(gemini_chip))
 
         job_progress_panel = gr.HTML(render_current_job_panel())
         with gr.Row():
