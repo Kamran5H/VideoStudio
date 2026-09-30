@@ -16,6 +16,13 @@ End If
 logPath = appDir & "\outputs\logs\launch.log"
 WshShell.CurrentDirectory = appDir
 
+' Clean stale lock if present
+On Error Resume Next
+If fso.FileExists(appDir & "\outputs\queue\worker.lock") Then
+    fso.DeleteFile appDir & "\outputs\queue\worker.lock", True
+End If
+On Error GoTo 0
+
 Function ServerUp()
   Dim h
   ServerUp = False
@@ -33,8 +40,19 @@ If ServerUp() Then
   WScript.Quit
 End If
 
-py = appDir & "\.venv\Scripts\python.exe"
-If Not fso.FileExists(py) Then py = "python.exe"
+' Resolve Python executable
+py = ""
+If fso.FileExists(appDir & "\..\.venv\python.exe") Then
+    py = appDir & "\..\.venv\python.exe"
+ElseIf fso.FileExists(appDir & "\..\.venv\Scripts\python.exe") Then
+    py = appDir & "\..\.venv\Scripts\python.exe"
+ElseIf fso.FileExists(appDir & "\.venv\Scripts\python.exe") Then
+    py = appDir & "\.venv\Scripts\python.exe"
+ElseIf fso.FileExists(appDir & "\.venv\python.exe") Then
+    py = appDir & "\.venv\python.exe"
+Else
+    py = "python.exe"
+End If
 
 If Not fso.FolderExists(appDir & "\outputs") Then fso.CreateFolder(appDir & "\outputs")
 If Not fso.FolderExists(appDir & "\outputs\logs") Then fso.CreateFolder(appDir & "\outputs\logs")

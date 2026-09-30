@@ -866,8 +866,8 @@ class WanOfficialBackend(GenerationBackend):
     name = "wan_official"
     description = "Official Wan2.1-14B 720p (Public Async Queue)"
     SPACE = "Wan-AI/Wan2.1"
-    POLL_SECONDS = 12
-    MAX_WAIT = 2400
+    POLL_SECONDS = 10
+    MAX_WAIT = 120
 
     def __init__(self, config: StudioConfig):
         self.config = config
@@ -1471,9 +1471,10 @@ class SubtitleEngine:
         out_path: Path,
         style_name: str = "Neon Glow",
     ) -> Path:
-        """Burns styled subtitles into video via ffmpeg."""
+        """Burns styled subtitles into video via ffmpeg with Windows path safety."""
         style = SUBTITLE_STYLES.get(style_name, SUBTITLE_STYLES["Neon Glow"])
-        escaped_srt = str(srt_path).replace("\\", "/").replace(":", "\\:")
+        resolved = srt_path.resolve()
+        escaped_srt = str(resolved).replace("\\", "/").replace(":", "\\:").replace("'", "'\\\\\\''")
         force_style = (
             f"Fontsize={style['FontSize']},PrimaryColour={style['PrimaryColour']},"
             f"OutlineColour={style['OutlineColour']},BackColour={style['BackColour']},"
@@ -1655,18 +1656,24 @@ class JobSettings:
     style_preset: str = "Cinematic"
     quality: str = "1080p"
     aspect_ratio: str = "16:9"
-    duration: float = 10.0
+    duration: float = 6.0
     fps: int = 30
     language: str = "English"
     voice_gender: str = "Male"
+    voiceover: bool = True
+    voiceover_enabled: bool = True
     voice_script: str = ""
+    voice_speed: int = 0
+    voice_volume: float = 1.0
     music_mood: str = "Ambient"
+    music_volume: float = 0.25
     subtitles_enabled: bool = True
     subtitle_style: str = "Neon Glow"
     translate_lang: str = "None"
-    interpolate_60fps: bool = True
-    anti_fingerprint: bool = True
+    interpolate_60fps: bool = False
+    anti_fingerprint: bool = False
     watermark_logo: bool = False
+    allow_motion_fallback: bool = True
     seed: int = -1
     created_at: float = field(default_factory=time.time)
 
@@ -1709,8 +1716,8 @@ class JobQueue:
         self.is_worker = self._acquire_worker_lock()
         if not self.is_worker:
             log.warning("Another studio instance owns the queue — this one is VIEW-ONLY.")
-        # Auto-resume any unfinished jobs from prior laptop/browser sessions
-        self._auto_resume_interrupted_jobs()
+        # Startup stays responsive and idle — previous jobs are kept in history,
+        # and resuming is triggered via resume_queue() or new submissions.
 
     # -- single-worker lock --------------------------------------------------
 
@@ -2053,6 +2060,66 @@ class VideoStudio:
         if removed:
             log.info("Pruned %d old video(s), keeping newest %d", removed, keep)
 
+    def gallery(self) -> List[Dict[str, Any]]:
+        """Returns all completed videos for the interactive gallery, newest first."""
+        items: List[Dict[str, Any]] = []
+        seen_paths = set()
+
+        # 1. From completed jobs in queue
+        for js in reversed(self.queue.all_jobs()):
+            if js.stage == Stage.DONE and js.video_path:
+                p = Path(js.video_path)
+                if p.exists() and p not in seen_paths:
+                    seen_paths.add(p)
+                    thumb_p = Path(js.thumbnail_path) if js.thumbnail_path else None
+                    items.append({
+                        "id": js.job_id,
+                        "video": str(p),
+                        "thumb": str(thumb_p) if (thumb_p and thumb_p.exists()) else str(p),
+                        "prompt": js.settings.prompt if js.settings else "AI Generated Video",
+                        "seed": str(js.settings.seed) if (js.settings and js.settings.seed >= 0) else "Random",
+                        "srt": str(js.srt_path) if (js.srt_path and Path(js.srt_path).exists()) else "",
+                        "backend": js.backend_used or "VideoStudio AI",
+                        "mtime": p.stat().st_mtime,
+                    })
+
+        # 2. Also scan outputs/videos for any mp4 files on disk
+        videos_dir = DEFAULT_OUTPUT_DIR / "videos"
+        if videos_dir.exists():
+            for mp4 in sorted(videos_dir.glob("*.mp4"), key=lambda x: x.stat().st_mtime, reverse=True):
+                if mp4 not in seen_paths:
+                    seen_paths.add(mp4)
+                    jid = mp4.stem.replace("video_", "")
+                    thumb_candidate = DEFAULT_OUTPUT_DIR / "jobs" / jid / "thumb.jpg"
+                    srt_candidate = DEFAULT_OUTPUT_DIR / "jobs" / jid / "subtitles.srt"
+                    items.append({
+                        "id": jid[:10],
+                        "video": str(mp4),
+                        "thumb": str(thumb_candidate) if thumb_candidate.exists() else str(mp4),
+                        "prompt": f"Video {mp4.stem}",
+                        "seed": "preserved",
+                        "srt": str(srt_candidate) if srt_candidate.exists() else "",
+                        "backend": "VideoStudio",
+                        "mtime": mp4.stat().st_mtime,
+                    })
+
+        items.sort(key=lambda x: x.get("mtime", 0), reverse=True)
+        return items
+
+    def backend_status_html(self) -> str:
+        labels = {
+            "colab": "Colab T4 GPU Worker (Wan2.1)",
+            "ltx": "LTX-Video (HF ZeroGPU)",
+            "cogvideox": "CogVideoX-5B (ZeroGPU)",
+            "wan_official": "Wan2.1-14B (Public Queue)",
+        }
+        lines = []
+        for name in ("colab", "ltx", "cogvideox", "wan_official"):
+            be = self.backends.get(name)
+            ok = bool(be and be.available())
+            lines.append(f"{'🟢' if ok else '⚪'} <b>{labels.get(name, name)}</b>: {'Connected' if ok else 'Offline/Standby'}")
+        return "<br>".join(lines)
+
     def execute_job(self, status: JobStatus, progress_cb: Callable):
         sett = status.settings
         if not sett:
@@ -2163,12 +2230,8 @@ class VideoStudio:
                         transient = True
                     log.warning("Backend %s failed: %s", b_name, e)
 
-            # Quota/network is temporary — defer the whole job and auto-resume so
-            # we wait for REAL AI capacity instead of silently downgrading to
-            # stock footage. Finished chunks are kept on disk (checkpoint reuse),
-            # so the resume costs no extra GPU. Only a genuine backend outage
-            # (below) falls through to the cinematic-synthesis fallback.
-            if not success and (quota_hint or transient):
+            allow_fallback = getattr(sett, "allow_motion_fallback", True)
+            if not success and (quota_hint or transient) and not allow_fallback:
                 raise QuotaExhausted(
                     min(quota_hint or 300, self.config.quota_wait_cap_min * 60),
                     reason="Free GPU quota busy" if quota_hint else "Network unavailable",
@@ -2240,8 +2303,12 @@ class VideoStudio:
 
         # 6. Audio Narration & Music Ducking
         progress_cb(sett.job_id, Stage.AUDIO, 0.88, "Synthesizing voiceover & mixing music...")
-        vo_text = sett.voice_script.strip() or sett.prompt.strip()
-        vo_file, events = self.audio_engine.generate_voiceover(vo_text, sett.language, sett.voice_gender)
+        has_vo = getattr(sett, "voiceover_enabled", True) and getattr(sett, "voiceover", True)
+        if has_vo:
+            vo_text = sett.voice_script.strip() or sett.prompt.strip()
+            vo_file, events = self.audio_engine.generate_voiceover(vo_text, sett.language, sett.voice_gender)
+        else:
+            vo_file, events = None, []
         video_dur = ffprobe_duration(current_vid)
         vo_dur = ffprobe_duration(vo_file) if vo_file and Path(vo_file).exists() else 0.0
         # If the narration runs longer than the footage, hold the last frame so
@@ -2257,7 +2324,11 @@ class VideoStudio:
 
         # 7. Subtitles
         srt_file = job_dir / "subtitles.srt"
-        self.subtitle_engine.events_to_srt(events, srt_file)
+        if events:
+            self.subtitle_engine.events_to_srt(events, srt_file)
+        else:
+            dur_fmt = f"00:00:{int(min(video_dur, 9)):02d},000"
+            srt_file.write_text(f"1\n00:00:00,200 --> {dur_fmt}\n{sett.prompt[:70]}\n", encoding="utf-8")
         if sett.translate_lang != "None":
             tr_srt = job_dir / f"subtitles_{sett.translate_lang}.srt"
             self.subtitle_engine.translate_srt(srt_file, sett.translate_lang, tr_srt)

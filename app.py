@@ -1,39 +1,63 @@
 """
-app.py — 4K Ultra HD Streamlined VideoStudio Pro.
-Designed with precision for Kamran Ashraf (Kami).
+app.py — VideoStudio Pro (Obsidian Cinema Edition)
+Unified 4K Ultra HD AI Video & Storyboard Studio.
+Crafted for Kamran Ashraf (Kami).
 
-Launch:  python app.py
-Opens at: http://127.0.0.1:7860
+Launch:   python app.py
+Access:   http://127.0.0.1:7860
 """
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
 
 from video_studio import (
-    ASPECT_SIZES, DEFAULT_OUTPUT_DIR, LANG_CODES, MUSIC_MOODS, QUALITY_TIERS,
-    STYLE_PRESETS, SUBTITLE_STYLES, TTS_VOICES, AudioEngine, FreeLLMPromptEnhancer,
-    HardwareProbe, JobSettings, PromptEngine, Stage, StudioConfig, SubtitleEngine,
-    VideoEngine, VideoStudio, log, log_queue,
+    ASPECT_SIZES,
+    DEFAULT_OUTPUT_DIR,
+    LANG_CODES,
+    MUSIC_MOODS,
+    QUALITY_TIERS,
+    STYLE_PRESETS,
+    SUBTITLE_STYLES,
+    TTS_VOICES,
+    AudioEngine,
+    FreeLLMPromptEnhancer,
+    HardwareProbe,
+    JobQueue,
+    JobSettings,
+    JobStatus,
+    PromptEngine,
+    Stage,
+    StudioConfig,
+    SubtitleEngine,
+    VideoEngine,
+    VideoStudio,
+    frames_for,
+    log,
+    log_queue,
 )
 
+# Global VideoStudio Instance
 STUDIO = VideoStudio()
 
-ASPECT_LABELS = {
-    "16:9": "16:9 · YouTube / Cinema",
-    "9:16": "9:16 · Reels / Shorts / TikTok",
-    "1:1": "1:1 · Square / Instagram",
-    "21:9": "21:9 · Ultrawide 4K",
-    "4:3": "4:3 · Classic TV / Vintage",
+# Mapping constants
+ASPECT_OPTIONS = {
+    "16:9 · YouTube / Cinema": "16:9",
+    "9:16 · Reels / Shorts / TikTok": "9:16",
+    "1:1 · Square / Instagram": "1:1",
+    "21:9 · Ultrawide Cinema": "21:9",
+    "4:3 · Classic TV": "4:3",
 }
+ASPECT_CHOICES = list(ASPECT_OPTIONS.keys())
 
 LANGUAGES = list(TTS_VOICES.keys())
 SUBTITLE_LANGS = ["None"] + list(LANG_CODES.keys())
@@ -54,80 +78,121 @@ STAGE_ICONS = {
     Stage.CANCELLED: "⊘",
 }
 
+STAGE_ORDER = [
+    Stage.QUEUED,
+    Stage.ENHANCING,
+    Stage.GENERATING,
+    Stage.STITCHING,
+    Stage.INTERPOLATING,
+    Stage.UPSCALING,
+    Stage.AUDIO,
+    Stage.SUBTITLES,
+    Stage.DONE,
+]
+
+# Curated Prompt Inspirations
+PROMPT_PRESETS = {
+    "🦅 Himalayan Eagle": (
+        "A majestic golden eagle soaring gracefully above snow-capped Himalayan peaks in dramatic golden hour sunrise light, 8k nature documentary cinematic masterpiece.",
+        "Documentary", "1080p", "16:9 · YouTube / Cinema", 6, "English", "Female",
+        "High above the world, freedom finds its true horizon.", "Ambient", "Classic White"
+    ),
+    "🏎️ Cyberpunk Tokyo": (
+        "A sleek futuristic neon hypercar drifting through rain-slicked Tokyo streets at night, vibrant cyan and magenta reflections, ultra-detailed 35mm anamorphic cinema lens, 4k ultra hd.",
+        "Cyberpunk", "1080p", "16:9 · YouTube / Cinema", 6, "English", "Male",
+        "Night city beats with neon speed and electric dreams.", "Dramatic", "Neon Glow"
+    ),
+    "🌌 Deep Space Nebula": (
+        "An astronaut floating gently past a glowing bioluminescent alien nebula with shimmering cosmic dust and colossal ringed planets in deep space, volumetric lighting.",
+        "Cinematic", "1080p", "16:9 · YouTube / Cinema", 8, "English", "Male",
+        "Beyond the boundaries of our solar system lies the infinite unknown.", "Ambient", "Neon Glow"
+    ),
+    "🌊 Tropical Coral Reef": (
+        "Sunlight piercing crystal clear turquoise ocean waters revealing a vibrant coral reef kingdom with sea turtles and glowing exotic marine life, 4k hdr.",
+        "Hyper-realistic", "1080p", "16:9 · YouTube / Cinema", 6, "English", "Female",
+        "Beneath the surface lies a tranquil universe untouched by time.", "Calm", "Classic White"
+    ),
+    "🇵🇰 اردو سینما - پرانی گاڑی": (
+        "شہر کی خوبصورت بارش میں چلتی ہوئی پرانی گاڑی اور شام کے سائے، خوبصورت سینما فوٹیج",
+        "Cinematic", "1080p", "16:9 · YouTube / Cinema", 6, "Urdu", "Male",
+        "ہر سفر کی اپنی ایک کہانی ہوتی ہے، جو دل سے شروع ہو کر منزل تک پہنچتی ہے۔", "Dramatic", "Gold Luxury"
+    ),
+    "🌸 Anime Cherry Blossom": (
+        "Gentle spring breeze blowing pink cherry blossom petals across a traditional Japanese temple garden at sunset, Makoto Shinkai anime aesthetic, ethereal glow.",
+        "Anime", "1080p", "16:9 · YouTube / Cinema", 5, "Japanese", "Female",
+        "Spring returns, bringing memories of the past.", "Calm", "Neon Glow"
+    ),
+}
+PRESET_CHOICES = ["💡 Select an Inspiration Preset..."] + list(PROMPT_PRESETS.keys())
+
 # ---------------------------------------------------------------------------
-# CSS — Ultra-Clean 4K HDR Obsidian Studio Aesthetics
+# CSS — Ultra-Clean Obsidian Cinema Aesthetics (Gradio 6 Optimized)
 # ---------------------------------------------------------------------------
 
 CSS = """
 :root, .dark, body, .gradio-container {
-  --bg-dark: #05070E;
-  --bg-card: rgba(12, 17, 32, 0.88);
-  --bg-card-sub: rgba(18, 25, 46, 0.70);
-  --glass-border: rgba(99, 102, 241, 0.24);
-  --glass-border-focus: rgba(56, 189, 248, 0.70);
-  --accent-blue: #38BDF8;
+  --bg-deep: #05070E;
+  --bg-card: rgba(13, 18, 36, 0.85);
+  --bg-card-sub: rgba(18, 25, 48, 0.65);
+  --border-glass: rgba(99, 102, 241, 0.22);
+  --border-focus: #38BDF8;
+  --accent-cyan: #38BDF8;
   --accent-indigo: #6366F1;
   --accent-purple: #A855F7;
-  --gold: #F59E0B;
-  --txt-main: #F8FAFC;
-  --txt-muted: #94A3B8;
-  --txt-dim: #64748B;
+  --accent-gold: #F59E0B;
+  --txt-bright: #F8FAFC;
+  --txt-dim: #94A3B8;
+  --txt-muted: #64748B;
   
   --body-background-fill: #05070E !important;
-  --background-fill-primary: #0A0E1A !important;
-  --background-fill-secondary: #10162A !important;
-  --border-color-primary: rgba(99, 102, 241, 0.25) !important;
-  --block-background-fill: rgba(12, 17, 32, 0.88) !important;
+  --background-fill-primary: #0A0F1D !important;
+  --background-fill-secondary: #0F1629 !important;
+  --border-color-primary: rgba(99, 102, 241, 0.20) !important;
+  --block-background-fill: rgba(13, 18, 36, 0.85) !important;
   --block-label-text-color: #E2E8F0 !important;
   --block-title-text-color: #FFFFFF !important;
   --body-text-color: #F8FAFC !important;
-  --body-text-color-subdued: #94A3B8 !important;
-  --input-background-fill: #080C18 !important;
+  --input-background-fill: #080D1A !important;
   --input-border-color: rgba(99, 102, 241, 0.28) !important;
-  --input-placeholder-color: #475569 !important;
 }
 
 body, .gradio-container {
   background:
-    radial-gradient(1200px 500px at 15% -5%, rgba(99, 102, 241, 0.18), transparent 60%),
-    radial-gradient(1000px 450px at 85% -5%, rgba(168, 85, 247, 0.14), transparent 55%),
-    linear-gradient(175deg, #04060C 0%, #070B16 100%) !important;
+    radial-gradient(1000px 450px at 15% -5%, rgba(99, 102, 241, 0.16), transparent 60%),
+    radial-gradient(900px 400px at 85% -5%, rgba(168, 85, 247, 0.12), transparent 55%),
+    linear-gradient(175deg, #03050A 0%, #070B16 100%) !important;
   color: #F8FAFC !important;
   font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
-  max-width: 1560px !important;
+  max-width: 1580px !important;
   margin: 0 auto !important;
-  padding: 10px 16px !important;
-  min-height: 100vh;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  padding: 12px 18px !important;
 }
 
-/* Slim Studio Top Bar */
+/* Studio Top Bar */
 #studio-navbar {
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
-  padding: 10px 20px !important;
-  margin-bottom: 14px !important;
-  background: rgba(11, 16, 30, 0.85) !important;
+  padding: 12px 22px !important;
+  margin-bottom: 16px !important;
+  background: rgba(12, 17, 34, 0.88) !important;
   border: 1px solid rgba(99, 102, 241, 0.25) !important;
   border-radius: 16px !important;
-  backdrop-filter: blur(20px) saturate(180%) !important;
-  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+  backdrop-filter: blur(16px) !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
 }
 
 .studio-logo {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 1.35rem;
+  font-size: 1.40rem;
   font-weight: 900;
   letter-spacing: -0.02em;
-  background: linear-gradient(110deg, #FFFFFF 10%, #C7D2FE 50%, #38BDF8 100%);
+  background: linear-gradient(110deg, #FFFFFF 15%, #C7D2FE 50%, #38BDF8 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .badge-chip {
@@ -136,18 +201,17 @@ body, .gradio-container {
   gap: 6px;
   padding: 4px 12px;
   border-radius: 20px;
-  font-size: 0.82rem;
+  font-size: 0.80rem;
   font-weight: 700;
   letter-spacing: 0.3px;
   border: 1px solid transparent;
-  transition: all 0.2s ease;
 }
 
 .badge-kami {
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(168, 85, 247, 0.15));
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16), rgba(168, 85, 247, 0.16));
   border-color: rgba(245, 158, 11, 0.45);
   color: #FDE047;
-  box-shadow: 0 0 12px rgba(245, 158, 11, 0.25);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.20);
 }
 
 .badge-pro {
@@ -162,140 +226,37 @@ body, .gradio-container {
   color: #A5B4FC;
 }
 
-/* Master Glass Panels — NO backdrop-filter here so position:fixed dropdowns anchor to viewport */
-.glass-panel, .gr-group, .gr-box, .gr-panel, .tabitem, .block {
-  background: rgba(11, 16, 30, 0.92) !important;
-  border: 1px solid rgba(99, 102, 241, 0.22) !important;
-  border-radius: 16px !important;
+/* Glass Panels */
+.glass-panel, .gr-group, .gr-box, .gr-panel, .block {
+  background: rgba(12, 17, 34, 0.88) !important;
+  border: 1px solid rgba(99, 102, 241, 0.20) !important;
+  border-radius: 14px !important;
 }
 
-.gr-form, .gr-row, .gr-column, .block, .form, .tabitem {
-  overflow: visible !important;
-}
-
-/* Modern Tab Bar */
-.tab-nav, div[role="tablist"] {
-  border-bottom: 1.5px solid rgba(99, 102, 241, 0.25) !important;
-  gap: 10px !important;
-  margin-bottom: 14px !important;
-  padding: 4px 0 !important;
-}
-
-.tab-nav button, button[role="tab"] {
-  background: rgba(255, 255, 255, 0.04) !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
-  color: #CBD5E1 !important;
-  font-size: 0.96rem !important;
-  font-weight: 700 !important;
-  padding: 9px 20px !important;
-  border-radius: 12px !important;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-}
-
-.tab-nav button:hover, button[role="tab"]:hover {
-  background: rgba(99, 102, 241, 0.18) !important;
-  border-color: rgba(56, 189, 248, 0.5) !important;
-  color: #FFFFFF !important;
-  transform: translateY(-1px) !important;
-}
-
-.tab-nav button.selected, button[role="tab"][aria-selected="true"], button[role="tab"].selected {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.35), rgba(168, 85, 247, 0.30)) !important;
-  border: 1.5px solid #38BDF8 !important;
-  color: #FFFFFF !important;
-  font-weight: 800 !important;
-  box-shadow: 0 0 16px rgba(56, 189, 248, 0.35) !important;
-}
-
-/* Inputs, Textareas & Form Controls */
-textarea, select, .gr-text-input {
-  background: #080C18 !important;
+/* Inputs & Form Controls */
+textarea, select, input[type="text"], input[type="number"], .gr-text-input {
+  background: #080D1A !important;
   border: 1.5px solid rgba(99, 102, 241, 0.28) !important;
   color: #F8FAFC !important;
   font-size: 0.94rem !important;
   border-radius: 12px !important;
-  padding: 9px 12px !important;
   transition: all 0.2s ease !important;
 }
 
-textarea:focus, select:focus {
+textarea:focus, select:focus, input:focus {
   border-color: #38BDF8 !important;
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.25) !important;
-  background: #0B1020 !important;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22) !important;
+  background: #0B1122 !important;
 }
 
-/* Gradio 6 Dropdown & Popup Fixes */
-.wrap, .wrap-default, .secondary-wrap {
-  background: #080C18 !important;
-  border: 1.5px solid rgba(99, 102, 241, 0.28) !important;
-  border-radius: 12px !important;
-  cursor: pointer !important;
-}
-
-.wrap input, .wrap-default input, .secondary-wrap input {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  outline: none !important;
-  color: #FFFFFF !important;
-  font-size: 0.94rem !important;
-  cursor: pointer !important;
-}
-
-.options, ul.options, [role="listbox"] {
-  background: #0F162A !important;
-  border: 1.5px solid #38BDF8 !important;
-  border-radius: 12px !important;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.9) !important;
-  max-height: 280px !important;
-  z-index: 999999 !important;
-}
-
-.options li, ul.options li, [role="listbox"] li, .item.svelte-1ou0lab {
-  color: #F8FAFC !important;
-  padding: 10px 14px !important;
-  font-size: 0.92rem !important;
-  font-weight: 600 !important;
-  cursor: pointer !important;
-  transition: background 0.15s ease !important;
-}
-
-.options li:hover, ul.options li:hover, [role="listbox"] li:hover, .item.svelte-1ou0lab:hover, .active.svelte-1ou0lab {
-  background: rgba(99, 102, 241, 0.45) !important;
-  color: #38BDF8 !important;
-}
-
-label, span.label-text, .block-title, label span {
-  color: #E2E8F0 !important;
-  font-weight: 700 !important;
-  font-size: 0.88rem !important;
-  margin-bottom: 3px !important;
-}
-
-/* Clean Compact Accordions */
-.gr-accordion, .accordion {
-  border: 1px solid rgba(99, 102, 241, 0.22) !important;
-  border-radius: 14px !important;
-  background: rgba(14, 20, 36, 0.55) !important;
-  margin: 8px 0 !important;
-  overflow: hidden !important;
-}
-
-.gr-accordion-header, .accordion-header {
-  color: #F1F5F9 !important;
-  font-weight: 700 !important;
-  font-size: 0.92rem !important;
-  padding: 10px 14px !important;
-}
-
-/* Action Buttons */
+/* Primary Action Buttons */
 .gr-button-primary, button.primary {
   background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 50%, #0284C7 100%) !important;
   border: none !important;
   color: #FFFFFF !important;
   font-weight: 800 !important;
   font-size: 1.02rem !important;
-  padding: 11px 22px !important;
+  padding: 12px 24px !important;
   border-radius: 12px !important;
   box-shadow: 0 6px 20px rgba(79, 70, 229, 0.45) !important;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
@@ -309,7 +270,7 @@ label, span.label-text, .block-title, label span {
 }
 
 .gr-button-secondary, button.secondary {
-  background: rgba(26, 35, 58, 0.75) !important;
+  background: rgba(22, 30, 52, 0.75) !important;
   border: 1px solid rgba(99, 102, 241, 0.35) !important;
   color: #F8FAFC !important;
   font-weight: 700 !important;
@@ -327,8 +288,8 @@ label, span.label-text, .block-title, label span {
 }
 
 .gr-button-stop, button.stop {
-  background: rgba(239, 68, 68, 0.14) !important;
-  border: 1px solid rgba(239, 68, 68, 0.38) !important;
+  background: rgba(239, 68, 68, 0.15) !important;
+  border: 1px solid rgba(239, 68, 68, 0.40) !important;
   color: #FCA5A5 !important;
   font-weight: 700 !important;
   border-radius: 12px !important;
@@ -338,26 +299,24 @@ label, span.label-text, .block-title, label span {
 
 .gr-button-stop:hover {
   background: rgba(239, 68, 68, 0.28) !important;
-  border-color: #EF4444 !important;
   color: #FFFFFF !important;
 }
 
-/* Cinema Viewport Container */
-.viewport-box {
-  background: #020409 !important;
-  border: 1.5px solid rgba(99, 102, 241, 0.30) !important;
-  border-radius: 16px !important;
-  overflow: hidden !important;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7) !important;
+/* Accordions */
+.gr-accordion, .accordion {
+  border: 1px solid rgba(99, 102, 241, 0.20) !important;
+  border-radius: 12px !important;
+  background: rgba(14, 20, 38, 0.50) !important;
+  margin: 6px 0 !important;
 }
 
-/* Live Progress Cards */
+/* Queue Cards */
 .q-card {
   padding: 12px 16px;
   margin: 6px 0 10px 0;
   border-radius: 14px;
-  background: linear-gradient(135deg, rgba(16, 22, 40, 0.90), rgba(10, 14, 26, 0.95));
-  border: 1px solid rgba(99, 102, 241, 0.30);
+  background: linear-gradient(135deg, rgba(16, 22, 42, 0.92), rgba(10, 14, 28, 0.95));
+  border: 1px solid rgba(99, 102, 241, 0.28);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
 }
 
@@ -403,14 +362,13 @@ label, span.label-text, .block-title, label span {
   box-shadow: 0 0 10px rgba(56, 189, 248, 0.6);
 }
 
-/* Hardware & System Status Badges */
 .hw-badge {
   display: block;
-  background: rgba(14, 20, 36, 0.65);
-  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(14, 20, 38, 0.60);
+  border: 1px solid rgba(99, 102, 241, 0.22);
   padding: 10px 14px;
   border-radius: 12px;
-  font-size: 0.86rem;
+  font-size: 0.84rem;
   color: #CBD5E1;
   line-height: 1.5;
 }
@@ -419,121 +377,8 @@ footer { display: none !important; }
 """
 
 # ---------------------------------------------------------------------------
-# Demo Presets Dictionary (4K Quality Preset)
+# UI Callback Logic (Non-blocking & Asynchronous)
 # ---------------------------------------------------------------------------
-
-DEMO_AI_PRESETS = {
-    "cyberpunk": (
-        "A sleek futuristic neon hypercar drifting through rain-slicked Tokyo streets at night, vibrant cyan and magenta reflections, ultra-detailed 35mm cinema lens, 4k ultra hd.",
-        "Cyberpunk", "4K", "16:9", 8, "English", "Male", "Night city beats with neon speed.", "Dramatic", "Neon Glow"
-    ),
-    "eagle": (
-        "A majestic golden eagle soaring gracefully above snow-capped Himalayan peaks in dramatic sunrise volumetric light, 8k nature documentary masterpiece.",
-        "Documentary", "4K", "16:9", 6, "English", "Female", "High above the world, freedom finds its true horizon.", "Ambient", "Classic White"
-    ),
-    "space": (
-        "An astronaut floating gently past a glowing bioluminescent alien nebula with shimmering stardust and colossal ringed planets in deep cosmos, 4k resolution.",
-        "Cyberpunk", "4K", "16:9", 8, "English", "Male", "Beyond the boundaries of our solar system lies the infinite unknown.", "Ambient", "Neon Glow"
-    ),
-    "ocean": (
-        "Sunlight piercing crystal clear turquoise ocean waters revealing a vibrant coral reef kingdom with sea turtles and glowing exotic marine life, 4k hdr.",
-        "Hyper-realistic", "4K", "16:9", 6, "English", "Female", "Beneath the surface lies a tranquil universe untouched by time.", "Calm", "Neon Glow"
-    ),
-    "urdu": (
-        "شہر کی خوبصورت بارش میں چلتی ہوئی پرانی گاڑی اور شام کے سائے، خوبصورت سینما فوٹیج",
-        "Cinematic", "4K", "16:9", 6, "Urdu", "Male", "ہر سفر کی اپنی ایک کہانی ہوتی ہے، جو دل سے شروع ہو کر منزل تک پہنچتی ہے۔", "Dramatic", "Gold Luxury"
-    )
-}
-
-DEMO_STORY_PRESETS = {
-    "pyramids": (
-        "The Lost Secrets of Ancient Pyramids",
-        "Visual: aerial pyramids golden hour sunrise\nVO: For five thousand years, the ancient pyramids have guarded the deepest secrets of human history.\nVisual: close up hieroglyphs inside tomb torches\nVO: Carved in stone, ancient architects encoded knowledge of the stars.\nVisual: desert night sky milky way over pyramids\nVO: Aligning perfectly with the cosmos, they remain an eternal monument to wonder.",
-        "Cinematic", "16:9", "English", "Male", "Dramatic"
-    ),
-    "ai_future": (
-        "The Quantum AI Revolution",
-        "Visual: glowing quantum neural network circuits\nVO: We stand on the precipice of the greatest technological revolution in human history.\nVisual: robot hand shaking human hand in modern lab\nVO: Artificial intelligence is no longer science fiction—it is reshaping our world.\nVisual: futuristic glowing smart city skyline\nVO: Empowering human creativity to reach heights never before imagined.",
-        "Cyberpunk", "16:9", "English", "Female", "Uplifting"
-    ),
-    "ocean_giants": (
-        "Mysteries of the Deep Ocean",
-        "Visual: deep ocean sunlight fading into blue abyss\nVO: Covering seventy percent of our planet, the deep sea remains less explored than the moon.\nVisual: bioluminescent glowing jellyfish in deep darkness\nVO: In complete darkness, mysterious creatures generate their own living light.\nVisual: giant blue whale gliding gracefully through ocean\nVO: The silent giants of the deep remind us of the majesty of Earth.",
-        "Hyper-realistic", "16:9", "English", "Male", "Ambient"
-    ),
-    "urdu_motivation": (
-        "کامیابی اور ہمت کا راستہ",
-        "Visual: high mountain climber reaching summit sunrise\nVO: زندگی میں کامیابی صرف خواب دیکھنے سے نہیں، بلکہ ہر مشکل کا ڈٹ کر مقابلہ کرنے سے ملتی ہے۔\nVisual: sunrise over golden valley landscape\nVO: ہر نئی صبح ایک نیا موقع لے کر آتی ہے کہ آپ اپنی تقدیر خود لکھیں۔\nVisual: eagle flying across clouds into sun\nVO: جب ارادے پختہ ہوں تو آسمان کی بلندی بھی قدم چومتی ہے۔",
-        "Cinematic", "16:9", "Urdu", "Male", "Dramatic"
-    )
-}
-
-AI_TEMPLATE_CHOICES = [
-    "💡 Select a 4K Template...",
-    "🦅 Golden Eagle — Himalayan Sunrise 4K",
-    "🏎️ Cyberpunk Chase — Neon Tokyo 4K",
-    "🌌 Deep Space — Alien Nebula 4K",
-    "🌊 Ocean Kingdom — Coral Reef 4K",
-    "🇵🇰 اردو سینما — Classic City 4K",
-]
-
-AI_TEMPLATE_MAP = {
-    "🦅 Golden Eagle — Himalayan Sunrise 4K": "eagle",
-    "🏎️ Cyberpunk Chase — Neon Tokyo 4K": "cyberpunk",
-    "🌌 Deep Space — Alien Nebula 4K": "space",
-    "🌊 Ocean Kingdom — Coral Reef 4K": "ocean",
-    "🇵🇰 اردو سینما — Classic City 4K": "urdu",
-}
-
-STORY_TEMPLATE_CHOICES = [
-    "💡 Select a Storyboard Template...",
-    "📜 Ancient Pyramids — Lost Secrets",
-    "📜 Quantum AI — Future Revolution",
-    "📜 Deep Ocean — Giants of the Deep",
-    "🇵🇰 اردو سبق آموز کہانی — ہمت کا راستہ",
-]
-
-STORY_TEMPLATE_MAP = {
-    "📜 Ancient Pyramids — Lost Secrets": "pyramids",
-    "📜 Quantum AI — Future Revolution": "ai_future",
-    "📜 Deep Ocean — Giants of the Deep": "ocean_giants",
-    "🇵🇰 اردو سبق آموز کہانی — ہمت کا راستہ": "urdu_motivation",
-}
-
-def load_ai_template(selected_label: str):
-    key = AI_TEMPLATE_MAP.get(selected_label)
-    if not key:
-        return [gr.skip()] * 10
-    preset = DEMO_AI_PRESETS.get(key)
-    return list(preset)
-
-def load_story_template(selected_label: str):
-    key = STORY_TEMPLATE_MAP.get(selected_label)
-    if not key:
-        return [gr.skip()] * 7
-    preset = DEMO_STORY_PRESETS.get(key)
-    return list(preset)
-
-# ---------------------------------------------------------------------------
-# Studio Callback Functions
-# ---------------------------------------------------------------------------
-
-def enhance_prompt_btn(prompt: str, preset: str) -> str:
-    if not prompt.strip():
-        return ""
-    return FreeLLMPromptEnhancer.expand_with_ai(prompt, preset, STUDIO.config)
-
-def generate_script_btn(topic: str, scenes: int, language: str) -> str:
-    if not topic.strip():
-        return ""
-    return FreeLLMPromptEnhancer.generate_script(topic, int(scenes), language)
-
-def duration_hint(sec) -> str:
-    n = max(1, int(-(-float(sec) // 5)))
-    if n == 1:
-        return "<span style='color:#64748B;font-size:0.82rem;'>⚡ Single 4K AI shot (≤5s)</span>"
-    return (f"<span style='color:#38BDF8;font-size:0.82rem;'>🎞️ {int(float(sec))}s 4K · "
-            f"{n} AI shots chained & crossfaded</span>")
 
 def job_progress_percent(progress: float) -> int:
     try:
@@ -541,15 +386,34 @@ def job_progress_percent(progress: float) -> int:
     except (TypeError, ValueError, OverflowError):
         return 0
 
-def render_job_card(job_id: str, prompt: str, stage: Stage, progress: float, message: str, elapsed: Optional[int] = None) -> str:
+
+def render_job_card(
+    job_id: str,
+    prompt: str,
+    stage: Stage,
+    progress: float,
+    message: str,
+    elapsed: Optional[int] = None,
+) -> str:
     pct = job_progress_percent(progress)
     icon = STAGE_ICONS.get(stage, "•")
-    color = "#10B981" if stage == Stage.DONE else "#EF4444" if stage in (Stage.FAILED, Stage.CANCELLED) else "#38BDF8"
-    elapsed_html = f"<span style='float:right; opacity:0.7;'>⏱️ {max(0, elapsed)}s</span>" if elapsed is not None else ""
+    color = (
+        "#10B981"
+        if stage == Stage.DONE
+        else "#EF4444"
+        if stage in (Stage.FAILED, Stage.CANCELLED)
+        else "#38BDF8"
+    )
+    elapsed_html = (
+        f"<span style='float:right; opacity:0.75;'>⏱️ {max(0, elapsed)}s</span>"
+        if elapsed is not None
+        else ""
+    )
     safe_job_id = html.escape(str(job_id))
-    safe_prompt = html.escape(str(prompt)[:40])
-    safe_stage = html.escape(stage.value)
+    safe_prompt = html.escape(str(prompt)[:55])
+    safe_stage = html.escape(stage.value if hasattr(stage, "value") else str(stage))
     safe_message = html.escape(str(message))
+
     return f"""
     <div class="q-card">
       <div class="q-head">
@@ -563,193 +427,17 @@ def render_job_card(job_id: str, prompt: str, stage: Stage, progress: float, mes
     </div>
     """
 
-def generate_ai_video_live(
-    prompt, negative, preset, quality, aspect, duration, language, gender,
-    custom_script, music, burn_subs, sub_style, tr_lang, interp_60, anti_fp, watermark, seed
-):
-    if not STUDIO.queue.is_worker:
-        yield "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only.", "<div class='q-card'>Queue is read-only in this instance.</div>", None, None, ""
-        return
-    if not prompt.strip():
-        yield "⚠️ Please enter a prompt first.", "<div class='q-card'><b>Enter a prompt</b> to generate 4K video.</div>", None, None, ""
-        return
 
-    sett = JobSettings(
-        mode="ai_video",
-        prompt=prompt.strip(),
-        negative_prompt=negative.strip() if negative else "",
-        style_preset=preset,
-        quality=quality or "4K",
-        aspect_ratio=aspect or "16:9",
-        duration=float(duration),
-        language=language,
-        voice_gender=gender,
-        voice_script=custom_script.strip() if custom_script else "",
-        music_mood=music,
-        subtitles_enabled=burn_subs,
-        subtitle_style=sub_style,
-        translate_lang=tr_lang,
-        interpolate_60fps=interp_60,
-        anti_fingerprint=anti_fp,
-        watermark_logo=watermark,
-        seed=int(seed),
-    )
-    job_id = STUDIO.queue.submit(sett)
-
-    start_t = time.time()
-    while True:
-        status = STUDIO.queue.get_status(job_id)
-        if not status:
-            time.sleep(1.0)
-            continue
-
-        pct = job_progress_percent(status.progress)
-        elapsed = int(time.time() - start_t)
-        card_html = render_job_card(
-            job_id,
-            status.settings.prompt if status.settings else "Job",
-            status.stage,
-            status.progress,
-            status.message,
-            elapsed,
-        )
-
-        if status.stage == Stage.DONE:
-            v_out = status.video_path if (status.video_path and Path(status.video_path).exists()) else None
-            srt_out = status.srt_path if (status.srt_path and Path(status.srt_path).exists()) else None
-            yield f"🎉 4K Video Completed: {job_id}", card_html, v_out, srt_out, job_id
-            break
-        elif status.stage == Stage.CANCELLED:
-            yield f"🛑 Job Cancelled: {job_id}", card_html, None, None, job_id
-            break
-        elif status.stage == Stage.FAILED:
-            yield f"❌ Job Error: {html.escape(str(status.error or 'Failed'))}", card_html, None, None, job_id
-            break
-
-        yield f"⏳ Rendering 4K ({pct}%)...", card_html, None, None, job_id
-        time.sleep(1.0)
-
-def generate_storyboard_video_live(
-    topic, script_text, preset, aspect, language, gender, music, burn_subs, sub_style, watermark, anti_fp
-):
-    if not STUDIO.queue.is_worker:
-        yield "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only.", "<div class='q-card'>Queue is read-only in this instance.</div>", None, ""
-        return
-    if not script_text.strip() and not topic.strip():
-        yield "⚠️ Please enter a topic or script.", "<div class='q-card'><b>Enter a script</b> to build video.</div>", None, ""
-        return
-
-    sett = JobSettings(
-        mode="script_story",
-        prompt=topic.strip() or "Storyboard Scene",
-        script_text=script_text.strip(),
-        style_preset=preset,
-        aspect_ratio=aspect or "16:9",
-        language=language,
-        voice_gender=gender,
-        music_mood=music,
-        subtitles_enabled=burn_subs,
-        subtitle_style=sub_style,
-        watermark_logo=watermark,
-        anti_fingerprint=anti_fp,
-    )
-    job_id = STUDIO.queue.submit(sett)
-
-    start_t = time.time()
-    while True:
-        status = STUDIO.queue.get_status(job_id)
-        if not status:
-            time.sleep(1.0)
-            continue
-
-        pct = job_progress_percent(status.progress)
-        elapsed = int(time.time() - start_t)
-        card_html = render_job_card(
-            job_id,
-            status.settings.prompt if status.settings else "Job",
-            status.stage,
-            status.progress,
-            status.message,
-            elapsed,
-        )
-
-        if status.stage == Stage.DONE:
-            v_out = status.video_path if (status.video_path and Path(status.video_path).exists()) else None
-            yield f"🎉 Storyboard Movie Completed: {job_id}", card_html, v_out, job_id
-            break
-        elif status.stage == Stage.CANCELLED:
-            yield f"🛑 Storyboard Cancelled: {job_id}", card_html, None, job_id
-            break
-        elif status.stage == Stage.FAILED:
-            yield f"❌ Storyboard Error: {html.escape(str(status.error or 'Failed'))}", card_html, None, job_id
-            break
-
-        yield f"⏳ Building Storyboard ({pct}%)...", card_html, None, job_id
-        time.sleep(1.0)
-
-def cancel_active_job_btn(job_id: str) -> str:
-    if not STUDIO.queue.is_worker:
-        return "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only."
-    if not job_id:
-        return "⚠️ No active job selected."
-    success = STUDIO.queue.cancel(job_id)
-    return f"🛑 Job [{job_id}] stopped." if success else f"Job [{job_id}] not found."
-
-def resume_all_interrupted_jobs_btn() -> str:
-    if not STUDIO.queue.is_worker:
-        return "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only."
-    STUDIO.queue._auto_resume_interrupted_jobs()
-    return "🔄 Interrupted jobs restored & resumed!"
-
-def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: str, gemini_k: str) -> str:
-    STUDIO.config.colab_url = colab_url.strip()
-    STUDIO.config.hf_token = hf_tok.strip()
-    STUDIO.config.pexels_api_key = pexels_k.strip()
-    STUDIO.config.pixabay_api_key = pixabay_k.strip()
-    STUDIO.config.gemini_api_key = gemini_k.strip()
-    STUDIO.config.save()
-    return "✅ Configuration & API Keys saved successfully!"
-
-def open_videos_folder() -> None:
-    v_dir = DEFAULT_OUTPUT_DIR / "videos"
-    v_dir.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "win32":
-        os.startfile(str(v_dir))
-    else:
-        subprocess.Popen(["xdg-open", str(v_dir)])
-
-def read_system_logs() -> str:
-    log_file = DEFAULT_OUTPUT_DIR / "logs" / "studio.log"
-    if log_file.exists():
-        try:
-            content = log_file.read_text(encoding="utf-8", errors="replace")
-            tail = content.splitlines()[-50:]
-            if tail:
-                return "\n".join(tail)
-        except Exception:
-            pass
-    return "Studio ready. Logs streaming..."
-
-def backend_status_html() -> str:
-    labels = {
-        "colab": "Colab T4 GPU Worker (Wan2.1)",
-        "ltx": "LTX-Video (HF ZeroGPU)",
-        "cogvideox": "CogVideoX-5B (ZeroGPU)",
-        "wan_official": "Wan2.1-14B (Public Queue)",
-    }
-    rows = []
-    for name in ("colab", "ltx", "cogvideox", "wan_official"):
-        be = STUDIO.backends.get(name)
-        ok = bool(be and be.available())
-        rows.append(f"{'🟢' if ok else '⚪'} <b>{labels.get(name, name)}</b>: {'Connected' if ok else 'Offline/Standby'}")
-    return "<div class='hw-badge'>" + "<br>".join(rows) + "</div>"
-
-def render_queue_table() -> str:
+def render_queue() -> str:
     jobs = STUDIO.queue.all_jobs()
     if not jobs:
-        return "<div class='q-card' style='font-size:0.86rem; color:#94A3B8;'>No jobs in queue. Submit a 4K Video or Storyboard to begin.</div>"
+        return (
+            "<div class='q-card' style='font-size:0.86rem; color:#94A3B8; text-align:center; padding:18px;'>"
+            "🚀 <b>Studio Idle</b>. Enter a creative prompt and click <b>Generate Video</b> to start."
+            "</div>"
+        )
     cards = []
-    for js in reversed(jobs[-8:]):
+    for js in reversed(jobs[-6:]):
         cards.append(
             render_job_card(
                 js.job_id,
@@ -761,301 +449,528 @@ def render_queue_table() -> str:
         )
     return "".join(cards)
 
+
+_gallery_cache_sig: tuple = ()
+
+
+def render_gallery():
+    items = STUDIO.gallery()
+    return [
+        (
+            it["thumb"] or it["video"],
+            f"#{it['id']} • {it['prompt'][:32]}",
+        )
+        for it in items
+        if it.get("video")
+    ]
+
+
+def render_gallery_if_changed():
+    global _gallery_cache_sig
+    items = STUDIO.gallery()
+    sig = tuple((it["id"], it.get("video"), it.get("thumb")) for it in items)
+    if sig == _gallery_cache_sig:
+        return gr.update()
+    _gallery_cache_sig = sig
+    return render_gallery()
+
+
+def gallery_metadata() -> List[Dict[str, Any]]:
+    return STUDIO.gallery()
+
+
+def on_gallery_select(evt: gr.SelectData, meta: List[Dict[str, Any]]) -> Tuple[Any, Any, Any, str]:
+    if not meta or evt.index is None or evt.index >= len(meta):
+        return gr.update(), gr.update(value=""), gr.update(), ""
+    item = meta[evt.index]
+    vid_path = item.get("video")
+    srt_path = item.get("srt")
+    info_md = (
+        f"### 🎬 #{item['id']} · {item['prompt']}\n"
+        f"**Engine**: `{item.get('backend', 'AI Studio')}` · **Seed**: `{item.get('seed', 'random')}`"
+    )
+    return (
+        vid_path if vid_path and Path(vid_path).exists() else None,
+        info_md,
+        srt_path if srt_path and Path(srt_path).exists() else None,
+        item["id"],
+    )
+
+
+def duration_hint(sec: float) -> str:
+    n = max(1, int(-(-float(sec) // 5)))
+    if n == 1:
+        return "<span style='color:#64748B; font-size:0.82rem;'>⚡ Single continuous shot (≤5s)</span>"
+    return (
+        f"<span style='color:#38BDF8; font-size:0.82rem;'>🎞️ {int(float(sec))}s video · "
+        f"{n} cinematic shots crossfaded & chained</span>"
+    )
+
+
+def load_prompt_preset(selected_label: str):
+    if not selected_label or selected_label not in PROMPT_PRESETS:
+        return [gr.skip()] * 10
+    preset = PROMPT_PRESETS[selected_label]
+    return list(preset)
+
+
+def enhance_prompt_btn(prompt: str, preset: str) -> str:
+    if not prompt.strip():
+        return ""
+    return FreeLLMPromptEnhancer.expand_with_ai(prompt, preset, STUDIO.config)
+
+
+def submit_video_job(
+    prompt: str,
+    enhanced_prompt: str,
+    negative: str,
+    preset: str,
+    quality: str,
+    aspect_label: str,
+    duration: float,
+    voiceover_enabled: bool,
+    voice_script: str,
+    language: str,
+    voice_gender: str,
+    music_mood: str,
+    subtitles_enabled: bool,
+    sub_style: str,
+    translate_lang: str,
+    interpolate_60fps: bool,
+    allow_motion_fallback: bool,
+    anti_fingerprint: bool,
+    watermark_logo: bool,
+    seed: float,
+) -> Tuple[str, str, str]:
+    if not prompt.strip():
+        return "⚠️ Please enter a creative prompt first.", render_queue(), ""
+
+    aspect = ASPECT_OPTIONS.get(aspect_label, "16:9")
+    final_prompt = (
+        enhanced_prompt.strip()
+        if (enhanced_prompt and enhanced_prompt.strip())
+        else prompt.strip()
+    )
+
+    settings = JobSettings(
+        mode="ai_video",
+        prompt=final_prompt,
+        negative_prompt=negative.strip() if negative else "",
+        style_preset=preset,
+        quality=quality or "1080p",
+        aspect_ratio=aspect,
+        duration=float(duration),
+        language=language,
+        voice_gender=voice_gender,
+        voice_script=voice_script.strip() if voiceover_enabled else "",
+        music_mood=music_mood,
+        subtitles_enabled=subtitles_enabled,
+        subtitle_style=sub_style,
+        translate_lang=translate_lang,
+        interpolate_60fps=interpolate_60fps,
+        allow_motion_fallback=allow_motion_fallback,
+        anti_fingerprint=anti_fingerprint,
+        watermark_logo=watermark_logo,
+        seed=int(seed) if seed is not None else -1,
+    )
+
+    try:
+        job_id = STUDIO.queue.submit(settings)
+        msg = f"🚀 **Job [{job_id}] submitted to queue!** Running asynchronously in background..."
+        return msg, render_queue(), job_id
+    except Exception as exc:
+        return f"⚠️ Submission error: {html.escape(str(exc))}", render_queue(), ""
+
+
+def stop_job_btn(job_id: str) -> Tuple[str, str]:
+    if not job_id:
+        # Cancel most recent running job if no specific ID given
+        jobs = STUDIO.queue.all_jobs()
+        active = [j for j in jobs if j.stage not in (Stage.DONE, Stage.FAILED, Stage.CANCELLED)]
+        if active:
+            job_id = active[-1].job_id
+        else:
+            return "⚠️ No active jobs running.", render_queue()
+    success = STUDIO.queue.cancel(job_id)
+    msg = f"🛑 Job [{job_id}] cancelled." if success else f"Job [{job_id}] not found."
+    return msg, render_queue()
+
+
+def resume_queue_action() -> Tuple[str, str]:
+    STUDIO.queue._auto_resume_interrupted_jobs()
+    return "🔄 Queue resumed! Processing pending jobs...", render_queue()
+
+
+def regenerate_video(loaded_job_id: str) -> Tuple[str, str, str]:
+    if not loaded_job_id:
+        return "⚠️ Select a video from the Gallery below to regenerate.", render_queue(), ""
+    for js in STUDIO.queue.all_jobs():
+        if js.job_id == loaded_job_id and js.settings:
+            new_settings = dataclasses.replace(
+                js.settings,
+                job_id=STUDIO.queue.studio.config.colab_url and "" or None,  # new id
+            )
+            new_settings.job_id = None or (hex(int(time.time() * 1000))[-8:])
+            new_id = STUDIO.queue.submit(new_settings)
+            return f"♻️ Re-submitting #{loaded_job_id} as new Job [{new_id}]...", render_queue(), new_id
+    return f"Could not find settings for #{loaded_job_id}.", render_queue(), ""
+
+
+def save_api_credentials(colab_url: str, hf_tok: str, gemini_k: str, pexels_k: str, pixabay_k: str) -> Tuple[str, str]:
+    STUDIO.config.colab_url = colab_url.strip()
+    STUDIO.config.hf_token = hf_tok.strip()
+    STUDIO.config.gemini_api_key = gemini_k.strip()
+    STUDIO.config.pexels_api_key = pexels_k.strip()
+    STUDIO.config.pixabay_api_key = pixabay_k.strip()
+    STUDIO.config.save()
+    return "✅ API Keys & Settings saved successfully!", STUDIO.backend_status_html()
+
+
+def open_videos_folder() -> None:
+    v_dir = DEFAULT_OUTPUT_DIR / "videos"
+    v_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        os.startfile(str(v_dir))
+    else:
+        subprocess.Popen(["xdg-open", str(v_dir)])
+
+
+def read_system_logs() -> str:
+    log_file = DEFAULT_OUTPUT_DIR / "logs" / "studio.log"
+    if log_file.exists():
+        try:
+            content = log_file.read_text(encoding="utf-8", errors="replace")
+            tail = content.splitlines()[-40:]
+            if tail:
+                return "\n".join(tail)
+        except Exception:
+            pass
+    return "VideoStudio engine initialized. Logs streaming..."
+
+
 # ---------------------------------------------------------------------------
-# Gradio Modern App Layout Definition
+# UI Construction (Obsidian Cinema Unified Layout)
 # ---------------------------------------------------------------------------
 
 def build_app() -> gr.Blocks:
-    with gr.Blocks(title="VideoStudio Pro — 4K Ultra HD AI Studio") as app:
-        has_gemini = bool(STUDIO.config.gemini_api_key or os.environ.get("GEMINI_API_KEY"))
-        gemini_chip = (
-            "<span class='badge-chip badge-pro'>💎 Pro Plan Connected · Zero-Billing</span>"
-            if has_gemini else
-            "<span class='badge-chip' style='background:rgba(255,255,255,0.06); color:#94A3B8;'>⚡ Cloud Multi-Provider Mode</span>"
-        )
-
-        # Slim High-End Studio Top Bar
+    with gr.Blocks(title="VideoStudio Pro — 4K AI Video Studio") as app:
+        # High-End Studio Top Bar
         with gr.Group(elem_id="studio-navbar"):
-            gr.HTML(f"""
-            <div style="display:flex; align-items:center; justify-content:space-between; width:100%; flex-wrap:wrap; gap:10px;">
-              <div style="display:flex; align-items:center; gap:12px;">
+            gr.HTML("""
+            <div style="display:flex; align-items:center; justify-content:space-between; width:100%; flex-wrap:wrap; gap:12px;">
+              <div style="display:flex; align-items:center; gap:14px;">
                 <span class="studio-logo">🎬 VideoStudio Pro</span>
-                <span class="badge-chip badge-4k">4K Ultra HD</span>
+                <span class="badge-chip badge-4k">4K Cinema Engine</span>
+                <span class="badge-chip badge-pro">⚡ Multi-GPU Cloud Active</span>
               </div>
-              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                <span class="badge-chip badge-kami">👑 Kami</span>
-                {gemini_chip}
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span class="badge-chip badge-kami">👑 Kamran Ashraf (Kami)</span>
               </div>
             </div>
             """)
 
-        active_job_id = gr.State("")
-        story_active_job_id = gr.State("")
+        gallery_meta_state = gr.State([])
+        active_video_id_state = gr.State("")
 
-        with gr.Tabs():
+        with gr.Row():
             # =================================================================
-            # TAB 1: 🌟 4K AI Video
+            # LEFT COLUMN: Creative Controls & Studio Parameters (scale=6)
             # =================================================================
-            with gr.Tab("🌟 4K AI Video"):
+            with gr.Column(scale=6):
+                # Prompt & Inspiration
                 with gr.Row():
-                    # Left Column: Creation Controls
-                    with gr.Column(scale=6):
-                        with gr.Row():
-                            ai_template_pick = gr.Dropdown(
-                                label="💡 Load Template Preset",
-                                choices=AI_TEMPLATE_CHOICES,
-                                value=AI_TEMPLATE_CHOICES[0],
-                                scale=4
-                            )
-                            enhance_btn = gr.Button("✨ Enhance with AI", variant="secondary", scale=2)
+                    preset_pick = gr.Dropdown(
+                        choices=PRESET_CHOICES,
+                        value=PRESET_CHOICES[0],
+                        label="💡 Load Creative Inspiration",
+                        scale=4,
+                    )
+                    ai_enhance_btn = gr.Button("✨ Enhance with AI", variant="secondary", scale=2)
 
-                        ai_prompt = gr.Textbox(
-                            label="Prompt / Creative Vision",
-                            placeholder="Describe your scene in detail (lighting, motion, optics)... or select a template above.",
-                            lines=3,
-                            value=DEMO_AI_PRESETS["eagle"][0]
+                prompt_input = gr.Textbox(
+                    label="Creative Prompt / Scene Vision",
+                    placeholder="Describe your scene in cinematic detail (optics, lighting, environment, camera motion)...",
+                    lines=3,
+                    value=PROMPT_PRESETS["🦅 Himalayan Eagle"][0],
+                )
+
+                with gr.Accordion("📝 Fine-Tune Enhanced Prompt (Optional)", open=False):
+                    enhanced_input = gr.Textbox(
+                        label="Expanded AI Prompt (leave blank to auto-use main prompt)",
+                        placeholder="Click '✨ Enhance with AI' above to generate cinematography details...",
+                        lines=2,
+                        value="",
+                    )
+
+                # Format, Resolution & Duration
+                with gr.Row():
+                    quality_pick = gr.Dropdown(
+                        label="Quality Tier",
+                        choices=QUALITY_TIERS,
+                        value="1080p",
+                    )
+                    aspect_pick = gr.Dropdown(
+                        label="Aspect Ratio",
+                        choices=ASPECT_CHOICES,
+                        value="16:9 · YouTube / Cinema",
+                    )
+                    style_pick = gr.Dropdown(
+                        label="Visual Style",
+                        choices=STYLES_LIST,
+                        value="Cinematic",
+                    )
+                    duration_slider = gr.Slider(
+                        label="Duration (seconds)",
+                        minimum=2,
+                        maximum=60,
+                        value=6,
+                        step=1,
+                    )
+
+                dur_hint_html = gr.HTML(duration_hint(6))
+
+                # Drawer 1: Neural Voiceover & Background Music
+                with gr.Accordion("🎙️ AI Voiceover & Background Music (Optional)", open=True):
+                    with gr.Row():
+                        vo_enable = gr.Checkbox(label="Enable Neural Voiceover", value=True)
+                        vo_gender = gr.Radio(label="Voice Actor", choices=["Female", "Male"], value="Female")
+                        vo_lang = gr.Dropdown(label="Language", choices=LANGUAGES, value="English")
+                    vo_script_input = gr.Textbox(
+                        label="Spoken Script / Narration (Blank = reads scene prompt)",
+                        placeholder="Type narration spoken by the voice actor...",
+                        lines=2,
+                        value=PROMPT_PRESETS["🦅 Himalayan Eagle"][6],
+                    )
+                    with gr.Row():
+                        music_pick = gr.Dropdown(label="Music Mood Bed", choices=MUSIC_MOODS, value="Ambient")
+
+                # Drawer 2: Styled Subtitles & Typography
+                with gr.Accordion("☰ Styled Karaoke Subtitles (Optional)", open=False):
+                    with gr.Row():
+                        subs_enable = gr.Checkbox(label="Burn Styled Subtitles into Video", value=True)
+                        sub_style_pick = gr.Dropdown(label="Subtitle Style Preset", choices=SUB_STYLES_LIST, value="Classic White")
+                        sub_translate_pick = gr.Dropdown(label="Translate Subtitles To", choices=SUBTITLE_LANGS, value="None")
+
+                # Drawer 3: Advanced Studio Parameters & Cloud Backends
+                with gr.Accordion("⚙️ Advanced AI Parameters & GPU Credentials", open=False):
+                    neg_prompt_input = gr.Textbox(
+                        label="Negative Prompt (Artifacts to suppress)",
+                        placeholder="blurry, distorted, low resolution, watermark...",
+                        lines=1,
+                        value="",
+                    )
+                    with gr.Row():
+                        motion_fallback_chk = gr.Checkbox(
+                            label="Allow Motion Synthesis Fallback when Cloud GPU is busy",
+                            value=True,
                         )
+                        interp_60_chk = gr.Checkbox(label="60 FPS Motion Interpolation", value=False)
+                        anti_fp_chk = gr.Checkbox(label="Anti-Fingerprint Filter", value=False)
+                        watermark_chk = gr.Checkbox(label="Branded Watermark", value=False)
+                    seed_input = gr.Number(label="Seed (-1 for Random)", value=-1, precision=0)
 
-                        # Core Essentials
-                        with gr.Row():
-                            ai_quality = gr.Dropdown(label="Quality Tier", choices=QUALITY_TIERS, value="4K")
-                            ai_aspect = gr.Dropdown(label="Aspect Ratio", choices=list(ASPECT_SIZES.keys()), value="16:9")
-                            ai_style = gr.Dropdown(label="Style Preset", choices=STYLES_LIST, value="Cinematic")
-                            ai_dur = gr.Slider(label="Duration (s)", minimum=2, maximum=60, value=6, step=1)
-
-                        ai_dur_hint = gr.HTML(duration_hint(6))
-
-                        # Drawer 1: Voiceover & Subtitles (Collapsed by default)
-                        with gr.Accordion("🎙️ Voiceover, Music & Subtitles (Optional)", open=False):
-                            ai_custom_script = gr.Textbox(
-                                label="Narration Script (Spoken Voiceover)",
-                                placeholder="Text spoken by the neural voice actor...",
-                                lines=2,
-                                value=DEMO_AI_PRESETS["eagle"][6]
-                            )
-                            with gr.Row():
-                                ai_lang = gr.Dropdown(label="Language", choices=LANGUAGES, value="English")
-                                ai_gender = gr.Radio(label="Voice", choices=["Male", "Female"], value="Female")
-                                ai_music = gr.Dropdown(label="Music Mood", choices=MUSIC_MOODS, value="Ambient")
-                            with gr.Row():
-                                ai_subs = gr.Checkbox(label="Burn Styled Subtitles", value=True)
-                                ai_sub_style = gr.Dropdown(label="Subtitle Style", choices=SUB_STYLES_LIST, value="Classic White")
-                                ai_tr_lang = gr.Dropdown(label="Translate Subtitles To", choices=SUBTITLE_LANGS, value="None")
-
-                        # Drawer 2: Advanced Parameters (Collapsed by default)
-                        with gr.Accordion("⚙️ Advanced Parameters (Optional)", open=False):
-                            ai_negative = gr.Textbox(
-                                label="Negative Prompt (Artifacts to avoid)",
-                                placeholder="blurry, distorted, low quality...",
-                                lines=1,
-                                value="",
-                            )
-                            with gr.Row():
-                                ai_interp = gr.Checkbox(label="60 FPS Motion Interpolation", value=False)
-                                ai_anti_fp = gr.Checkbox(label="Anti-Fingerprint Filter", value=True)
-                                ai_watermark = gr.Checkbox(label="Apply Watermark", value=False)
-                            ai_seed = gr.Number(label="Seed (-1 for Random)", value=-1, precision=0)
-
-                        # Primary Actions
-                        with gr.Row():
-                            ai_gen_btn = gr.Button("🚀 Generate 4K AI Video", variant="primary", size="lg", scale=4)
-                            ai_cancel_btn = gr.Button("🛑 Stop", variant="stop", size="lg", scale=1)
-
-                        ai_status_msg = gr.Markdown("")
-
-                    # Right Column: High-Definition Cinema Viewport
-                    with gr.Column(scale=5):
-                        gr.Markdown("### 🎬 4K Cinema Viewport")
-                        ai_live_card = gr.HTML("<div class='q-card'><b>Studio Ready</b>. Select a preset or type a prompt, then hit <b>Generate 4K Video</b>.</div>")
-                        with gr.Group(elem_classes=["viewport-box"]):
-                            ai_video_player = gr.Video(label="4K Rendered Output", interactive=False)
-                        
-                        # Compact Export Toolbar
-                        with gr.Row():
-                            ai_open_folder_btn = gr.Button("📂 Open Videos Folder", variant="secondary", scale=3)
-                            ai_srt_download = gr.File(label="Subtitles (.srt)", interactive=False, scale=3)
-
-                # Event Handlers for Tab 1
-                ai_template_pick.change(
-                    load_ai_template,
-                    inputs=[ai_template_pick],
-                    outputs=[ai_prompt, ai_style, ai_quality, ai_aspect, ai_dur, ai_lang, ai_gender, ai_custom_script, ai_music, ai_sub_style]
-                )
-                ai_dur.change(duration_hint, inputs=[ai_dur], outputs=[ai_dur_hint])
-                enhance_btn.click(enhance_prompt_btn, inputs=[ai_prompt, ai_style], outputs=[ai_prompt])
-                ai_gen_btn.click(
-                    generate_ai_video_live,
-                    inputs=[
-                        ai_prompt, ai_negative, ai_style, ai_quality, ai_aspect, ai_dur,
-                        ai_lang, ai_gender, ai_custom_script, ai_music, ai_subs, ai_sub_style,
-                        ai_tr_lang, ai_interp, ai_anti_fp, ai_watermark, ai_seed,
-                    ],
-                    outputs=[ai_status_msg, ai_live_card, ai_video_player, ai_srt_download, active_job_id],
-                )
-                ai_cancel_btn.click(cancel_active_job_btn, inputs=[active_job_id], outputs=[ai_status_msg])
-                ai_open_folder_btn.click(open_videos_folder)
-
-            # =================================================================
-            # TAB 2: 📜 Storyboard Director
-            # =================================================================
-            with gr.Tab("📜 Storyboard Director"):
-                with gr.Row():
-                    # Left Column: Storyboard Creation
-                    with gr.Column(scale=6):
-                        with gr.Row():
-                            story_template_pick = gr.Dropdown(
-                                label="💡 Load Storyboard Template",
-                                choices=STORY_TEMPLATE_CHOICES,
-                                value=STORY_TEMPLATE_CHOICES[0],
-                                scale=4
-                            )
-                            story_script_btn = gr.Button("✨ Direct Script with AI", variant="secondary", scale=2)
-
-                        with gr.Row():
-                            story_topic = gr.Textbox(
-                                label="Topic / Story Concept",
-                                placeholder="e.g., The Secret History of the Ancient Pyramids...",
-                                lines=1,
-                                value=DEMO_STORY_PRESETS["pyramids"][0],
-                                scale=4
-                            )
-                            story_scenes_cnt = gr.Slider(label="Scenes", minimum=2, maximum=10, value=3, step=1, scale=2)
-
-                        story_script = gr.Textbox(
-                            label="Multi-Scene Script (Structured Visual: and VO: lines)",
-                            placeholder="Visual: aerial pyramids golden hour\nVO: The ancient sands hold secrets...",
-                            lines=7,
-                            value=DEMO_STORY_PRESETS["pyramids"][1]
+                    gr.Markdown("#### 🔌 Cloud GPU & AI Keys")
+                    with gr.Row():
+                        cfg_colab = gr.Textbox(
+                            label="Colab Worker URL (*.gradio.live)",
+                            value=STUDIO.config.colab_url,
                         )
+                        cfg_hf = gr.Textbox(
+                            label="Hugging Face Token (ZeroGPU)",
+                            value=STUDIO.config.hf_token,
+                            type="password",
+                        )
+                    with gr.Row():
+                        cfg_gemini = gr.Textbox(
+                            label="Gemini API Key (Pro Plan)",
+                            value=STUDIO.config.gemini_api_key,
+                            type="password",
+                        )
+                        cfg_pexels = gr.Textbox(
+                            label="Pexels Key",
+                            value=STUDIO.config.pexels_api_key,
+                            type="password",
+                        )
+                        cfg_pixabay = gr.Textbox(
+                            label="Pixabay Key",
+                            value=STUDIO.config.pixabay_api_key,
+                            type="password",
+                        )
+                    save_cfg_btn = gr.Button("💾 Save API Credentials", variant="secondary")
+                    cfg_status_msg = gr.Markdown("")
 
-                        # Core Essentials
-                        with gr.Row():
-                            story_style = gr.Dropdown(label="Visual Aesthetic", choices=STYLES_LIST, value="Cinematic")
-                            story_aspect = gr.Dropdown(label="Aspect Ratio", choices=list(ASPECT_SIZES.keys()), value="16:9")
-                            story_lang = gr.Dropdown(label="Language", choices=LANGUAGES, value="English")
-                            story_gender = gr.Radio(label="Voice Actor", choices=["Male", "Female"], value="Male")
-
-                        # Collapsible Options
-                        with gr.Accordion("🎵 Audio, Subtitles & Filters (Optional)", open=False):
-                            with gr.Row():
-                                story_music = gr.Dropdown(label="Music Bed", choices=MUSIC_MOODS, value="Dramatic")
-                                story_subs = gr.Checkbox(label="Burn Karaoke Subtitles", value=True)
-                                story_sub_style = gr.Dropdown(label="Subtitle Style", choices=SUB_STYLES_LIST, value="Neon Glow")
-                            with gr.Row():
-                                story_anti_fp = gr.Checkbox(label="Anti-Fingerprint Filter", value=True)
-                                story_watermark = gr.Checkbox(label="Branding Watermark", value=False)
-
-                        # Action Buttons
-                        with gr.Row():
-                            story_gen_btn = gr.Button("🎬 Build 4K Storyboard Movie", variant="primary", size="lg", scale=4)
-                            story_cancel_btn = gr.Button("🛑 Stop", variant="stop", size="lg", scale=1)
-
-                        story_status_msg = gr.Markdown("")
-
-                    # Right Column: Storyboard Viewport
-                    with gr.Column(scale=5):
-                        gr.Markdown("### 🎬 Storyboard Movie Viewport")
-                        story_live_card = gr.HTML("<div class='q-card'><b>Storyboard Ready</b>. Direct a script or pick a template to build.</div>")
-                        with gr.Group(elem_classes=["viewport-box"]):
-                            story_video_player = gr.Video(label="Rendered Storyboard Movie", interactive=False)
-                        
-                        with gr.Row():
-                            story_open_folder_btn = gr.Button("📂 Open Videos Folder", variant="secondary")
-
-                # Event Handlers for Tab 2
-                story_template_pick.change(
-                    load_story_template,
-                    inputs=[story_template_pick],
-                    outputs=[story_topic, story_script, story_style, story_aspect, story_lang, story_gender, story_music]
-                )
-                story_script_btn.click(generate_script_btn, inputs=[story_topic, story_scenes_cnt, story_lang], outputs=[story_script])
-                story_gen_btn.click(
-                    generate_storyboard_video_live,
-                    inputs=[
-                        story_topic, story_script, story_style, story_aspect, story_lang,
-                        story_gender, story_music, story_subs, story_sub_style,
-                        story_watermark, story_anti_fp,
-                    ],
-                    outputs=[story_status_msg, story_live_card, story_video_player, story_active_job_id],
-                )
-                story_cancel_btn.click(cancel_active_job_btn, inputs=[story_active_job_id], outputs=[story_status_msg])
-                story_open_folder_btn.click(open_videos_folder)
-
-            # =================================================================
-            # TAB 3: ⚙️ Settings & System
-            # =================================================================
-            with gr.Tab("⚙️ Settings & System"):
+                # Primary Action Buttons
                 with gr.Row():
-                    # Column 1: API Credentials
-                    with gr.Column():
-                        gr.Markdown("### 🔌 Cloud GPU & AI Credentials")
-                        cfg_gemini = gr.Textbox(label="Gemini API Key (Pro Plan Active / Zero-Billing)", value=STUDIO.config.gemini_api_key, type="password")
-                        cfg_colab = gr.Textbox(label="Google Colab Worker URL (*.gradio.live)", value=STUDIO.config.colab_url)
-                        cfg_pexels = gr.Textbox(label="Pexels API Key (HD Stock Footage)", value=STUDIO.config.pexels_api_key, type="password")
-                        cfg_pixabay = gr.Textbox(label="Pixabay API Key (Stock Media)", value=STUDIO.config.pixabay_api_key, type="password")
-                        cfg_hf = gr.Textbox(label="Hugging Face Token (ZeroGPU)", value=STUDIO.config.hf_token, type="password")
-                        save_cfg_btn = gr.Button("💾 Save API Keys & Settings", variant="primary")
-                        save_msg = gr.Markdown("")
+                    generate_btn = gr.Button("🚀 Generate Video", variant="primary", size="lg", scale=4)
+                    stop_btn = gr.Button("🛑 Cancel Job", variant="stop", size="lg", scale=1)
 
-                        gr.HTML("""
-                        <div class='hw-badge' style='margin-top:12px; border-color:rgba(56,189,248,0.3); color:#38BDF8;'>
-                          <b>Zero-Billing & Continuous Execution:</b><br>
-                          • Model: Gemini 2.5 Flash / 1.5 Flash (Pro Plan Included)<br>
-                          • Crash Recovery: Atomic per-scene checkpoints saved to disk<br>
-                          • Cost to user: <b>$0.00 / Zero token billing</b>
-                        </div>
-                        """)
+                status_msg_box = gr.Markdown("")
 
-                    # Column 2: System Health, Queue & Logs
-                    with gr.Column():
-                        gr.Markdown("### 🖥️ Local Hardware & Backend Status")
-                        gr.HTML(f"<div class='hw-badge'>{STUDIO.probe.summary()}</div>")
-                        backend_status_box = gr.HTML(backend_status_html())
+            # =================================================================
+            # RIGHT COLUMN: Cinema Viewport, Gallery & Live Queue (scale=5)
+            # =================================================================
+            with gr.Column(scale=5):
+                # System Status Header
+                with gr.Group():
+                    gr.HTML(f"""
+                    <div class="hw-badge">
+                      <b>🖥️ Hardware:</b> {STUDIO.probe.summary()}<br>
+                      <div id="backend-status-container" style="margin-top:4px;">
+                        {STUDIO.backend_status_html()}
+                      </div>
+                    </div>
+                    """)
 
-                        gr.Markdown("### 📊 Job Queue & Recovery")
-                        with gr.Row():
-                            q_resume_btn = gr.Button("🔄 Resume Interrupted", variant="primary", size="sm")
-                            q_refresh_btn = gr.Button("⚡ Refresh Queue", variant="secondary", size="sm")
-                            open_folder_btn = gr.Button("📂 Open Folder", variant="secondary", size="sm")
-                        queue_card = gr.HTML(render_queue_table())
+                # 4K Cinema Viewport & Player
+                gr.Markdown("### 🎬 Cinema Viewport & Player")
+                video_player = gr.Video(
+                    label="4K Video Preview",
+                    interactive=False,
+                    height=320,
+                )
+                video_info_md = gr.Markdown("**Select a video from the Gallery below or generate a new scene.**")
 
-                        gr.Markdown("### 📋 Studio Logs")
-                        log_box = gr.Textbox(label="Live Log Console", lines=8, interactive=False)
-                        log_refresh = gr.Button("🔄 Refresh Logs", variant="secondary", size="sm")
-                        log_refresh.click(read_system_logs, outputs=[log_box])
+                # Action Toolbar
+                with gr.Row():
+                    srt_download = gr.File(label="Subtitles (.srt)", interactive=False, scale=2)
+                    regen_btn = gr.Button("♻️ Regenerate (Same Seed)", variant="secondary", scale=2)
+                    open_dir_btn = gr.Button("📂 Open Videos Folder", variant="secondary", scale=2)
 
-                save_cfg_btn.click(
-                    save_api_credentials,
-                    inputs=[cfg_colab, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini],
-                    outputs=[save_msg],
-                ).then(backend_status_html, outputs=[backend_status_box])
+                # Production Gallery
+                gr.Markdown("### 🎞️ Finished Videos Gallery")
+                gallery_view = gr.Gallery(
+                    value=render_gallery(),
+                    columns=3,
+                    height=250,
+                    object_fit="cover",
+                    label="Completed Videos",
+                    show_label=False,
+                )
 
-                q_refresh_btn.click(render_queue_table, outputs=[queue_card])
-                q_resume_btn.click(resume_all_interrupted_jobs_btn, outputs=[]).then(render_queue_table, outputs=[queue_card])
-                open_folder_btn.click(open_videos_folder)
+                # Live Queue & Progress
+                with gr.Row():
+                    gr.Markdown("### 📋 Live Queue & Progress")
+                    resume_q_btn = gr.Button("▶️ Resume Queue", variant="primary", size="sm", scale=1)
+                    refresh_q_btn = gr.Button("⚡ Refresh", variant="secondary", size="sm", scale=1)
 
-        # Background Timers for smooth live updates
-        queue_timer = gr.Timer(3.0)
-        queue_timer.tick(render_queue_table, None, queue_card)
-        log_timer = gr.Timer(5.0)
-        log_timer.tick(read_system_logs, None, log_box)
+                queue_box_html = gr.HTML(render_queue())
 
-        app.load(read_system_logs, outputs=[log_box])
-        app.load(render_queue_table, outputs=[queue_card])
+                # Live Logs Drawer
+                with gr.Accordion("📋 Live Studio Logs", open=False):
+                    log_console = gr.Textbox(label="", lines=6, interactive=False, show_label=False)
+                    refresh_log_btn = gr.Button("🔄 Refresh Logs", variant="secondary", size="sm")
+
+        # ---------------------------------------------------------------------
+        # Event Wiring & Dynamic Callbacks
+        # ---------------------------------------------------------------------
+
+        # Preset selection
+        preset_pick.change(
+            load_prompt_preset,
+            inputs=[preset_pick],
+            outputs=[
+                prompt_input, style_pick, quality_pick, aspect_pick, duration_slider,
+                vo_lang, vo_gender, vo_script_input, music_pick, sub_style_pick,
+            ],
+        )
+
+        # Duration hint
+        duration_slider.change(duration_hint, inputs=[duration_slider], outputs=[dur_hint_html])
+
+        # Prompt AI expansion
+        ai_enhance_btn.click(
+            enhance_prompt_btn,
+            inputs=[prompt_input, style_pick],
+            outputs=[enhanced_input],
+        )
+
+        # Submit generation (Non-blocking asynchronous submission)
+        generate_btn.click(
+            submit_video_job,
+            inputs=[
+                prompt_input, enhanced_input, neg_prompt_input, style_pick,
+                quality_pick, aspect_pick, duration_slider, vo_enable,
+                vo_script_input, vo_lang, vo_gender, music_pick,
+                subs_enable, sub_style_pick, sub_translate_pick,
+                interp_60_chk, motion_fallback_chk, anti_fp_chk, watermark_chk, seed_input,
+            ],
+            outputs=[status_msg_box, queue_box_html, active_video_id_state],
+        )
+
+        # Stop / Cancel Job
+        stop_btn.click(stop_job_btn, inputs=[active_video_id_state], outputs=[status_msg_box, queue_box_html])
+
+        # Resume Queue
+        resume_q_btn.click(resume_queue_action, outputs=[status_msg_box, queue_box_html])
+
+        # Refresh Queue manually
+        refresh_q_btn.click(render_queue, outputs=[queue_box_html])
+
+        # Gallery Card Click -> Load video and metadata
+        gallery_view.select(
+            on_gallery_select,
+            inputs=[gallery_meta_state],
+            outputs=[video_player, video_info_md, srt_download, active_video_id_state],
+        )
+
+        # Regenerate loaded video
+        regen_btn.click(regenerate_video, inputs=[active_video_id_state], outputs=[status_msg_box, queue_box_html, active_video_id_state])
+
+        # Open Output Folder
+        open_dir_btn.click(open_videos_folder)
+
+        # Save Credentials
+        save_cfg_btn.click(
+            save_api_credentials,
+            inputs=[cfg_colab, cfg_hf, cfg_gemini, cfg_pexels, cfg_pixabay],
+            outputs=[cfg_status_msg, queue_box_html],
+        )
+
+        # Refresh Logs
+        refresh_log_btn.click(read_system_logs, outputs=[log_console])
+
+        # Periodic Live Background Refreshers (Queue & Gallery sync every 2.0s without UI reload)
+        refresh_timer = gr.Timer(2.0)
+        refresh_timer.tick(render_queue, None, queue_box_html)
+        refresh_timer.tick(render_gallery_if_changed, None, gallery_view)
+        refresh_timer.tick(gallery_metadata, None, gallery_meta_state)
+
+        # Initial Page Load
+        app.load(read_system_logs, outputs=[log_console])
+        app.load(gallery_metadata, outputs=[gallery_meta_state])
+        app.load(render_queue, outputs=[queue_box_html])
 
     return app
+
 
 def launch_app(server_port: int = 7860):
     app = build_app()
     app.queue(default_concurrency_limit=10)
     managed = os.environ.get("VS_MANAGED_LAUNCH") == "1"
+
+    # Auto-find free port if 7860 is taken
+    target_port = server_port
+    import socket
+
+    def _port_free(p: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(("127.0.0.1", p)) != 0
+
+    if not _port_free(target_port):
+        for candidate in range(7860, 7880):
+            if _port_free(candidate):
+                target_port = candidate
+                break
+
+    log.info("Launching VideoStudio Pro on http://127.0.0.1:%d", target_port)
     app.launch(
         server_name="127.0.0.1",
-        server_port=server_port,
+        server_port=target_port,
         inbrowser=not managed,
         css=CSS,
         show_error=True,
     )
+
 
 if __name__ == "__main__":
     launch_app()
