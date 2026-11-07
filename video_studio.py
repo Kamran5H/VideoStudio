@@ -512,6 +512,18 @@ class PromptEngine:
         extra = user_negative.strip()
         return f"{DEFAULT_NEGATIVE}, {extra}" if extra else DEFAULT_NEGATIVE
 
+DEFAULT_GEMINI_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+
+
+def gemini_models() -> List[str]:
+    """Gemini models to try in order. Override with GEMINI_MODELS (comma list)
+    when Google retires/renames models — gemini-1.5-flash, which this file used
+    to hard-code, has already been shut down."""
+    raw = os.environ.get("GEMINI_MODELS", "")
+    models = [m.strip() for m in raw.split(",") if m.strip()]
+    return models or list(DEFAULT_GEMINI_MODELS)
+
+
 class FreeLLMPromptEnhancer:
     """Gemini AI Pro & Zero-Billing AI Director Engine.
     Leverages Gemini Pro Plan with smart failover across free models (Gemini 2.5 Flash,
@@ -541,8 +553,7 @@ class FreeLLMPromptEnhancer:
                     "Output ONLY the prompt text, no commentary, under 75 words."
                 )
                 
-                # Try Flash models first (highest RPM/TPM on Pro/Free tiers)
-                for model_name in ("gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash-lite"):
+                for model_name in gemini_models():
                     try:
                         resp = client.models.generate_content(
                             model=model_name,
@@ -593,7 +604,7 @@ class FreeLLMPromptEnhancer:
                     f"VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
                     "Output ONLY the Visual: and VO: lines without headers or numbering."
                 )
-                for model_name in ("gemini-2.5-flash", "gemini-1.5-flash"):
+                for model_name in gemini_models():
                     try:
                         resp = client.models.generate_content(
                             model=model_name,
@@ -1082,12 +1093,45 @@ class MediaFetcher:
         synth_img = self._generate_synthetic_image(prompt, target_width, target_height)
         return synth_img, "image"
 
+    @staticmethod
+    def _download(url: str, out: Path, min_bytes: int = 1024, timeout: int = 30,
+                  headers: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """Stream a URL to `out` atomically.
+
+        Writes to a .part file and renames only after a complete, non-trivial
+        download, so a dropped connection or an HTML error page can never be
+        cached and later fed to ffmpeg as a "video"/"image".
+        """
+        import requests
+        tmp = out.with_name(out.name + ".part")
+        try:
+            with requests.get(url, stream=True, timeout=timeout, headers=headers) as r:
+                r.raise_for_status()
+                ctype = r.headers.get("Content-Type", "")
+                if ctype.startswith(("text/", "application/json")):
+                    raise ValueError(f"unexpected content type {ctype!r}")
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+            if tmp.stat().st_size < min_bytes:
+                raise ValueError(f"download too small ({tmp.stat().st_size} bytes)")
+            tmp.replace(out)
+            return str(out)
+        except Exception as exc:
+            log.debug("Download failed for %s: %s", url.split("?")[0], exc)
+            tmp.unlink(missing_ok=True)
+            return None
+
     def _search_pexels_video(self, query: str, width: int, height: int) -> Optional[str]:
         import requests
         headers = {"Authorization": self.config.pexels_api_key}
         orientation = "portrait" if height > width else "landscape"
-        url = f"https://api.pexels.com/videos/search?query={query}&per_page=5&orientation={orientation}"
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(
+            "https://api.pexels.com/videos/search",
+            params={"query": query, "per_page": 5, "orientation": orientation},
+            headers=headers, timeout=10,
+        )
         if resp.status_code == 200:
             data = resp.json()
             videos = data.get("videos", [])
@@ -1105,18 +1149,18 @@ class MediaFetcher:
 
                 if best_file:
                     out = self.cache_dir / f"pexels_{uuid.uuid4().hex[:8]}.mp4"
-                    r = requests.get(best_file, stream=True, timeout=20)
-                    if r.status_code == 200:
-                        with open(out, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=1024*1024):
-                                f.write(chunk)
-                        return str(out)
+                    return self._download(best_file, out, min_bytes=50_000, timeout=60)
         return None
 
     def _search_pixabay_video(self, query: str) -> Optional[str]:
         import requests
-        url = f"https://pixabay.com/api/videos/?key={self.config.pixabay_api_key}&q={query}&per_page=3"
-        resp = requests.get(url, timeout=10)
+        # Key goes in `params`, never hand-built into a URL string that can be
+        # echoed into logs / exception messages.
+        resp = requests.get(
+            "https://pixabay.com/api/videos/",
+            params={"key": self.config.pixabay_api_key, "q": query, "per_page": 3},
+            timeout=10,
+        )
         if resp.status_code == 200:
             hits = resp.json().get("hits", [])
             if hits:
@@ -1124,30 +1168,25 @@ class MediaFetcher:
                 chosen = vids.get("large") or vids.get("medium") or vids.get("small")
                 if chosen and chosen.get("url"):
                     out = self.cache_dir / f"pixabay_{uuid.uuid4().hex[:8]}.mp4"
-                    r = requests.get(chosen["url"], stream=True, timeout=20)
-                    if r.status_code == 200:
-                        with open(out, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=1024*1024):
-                                f.write(chunk)
-                        return str(out)
+                    return self._download(chosen["url"], out, min_bytes=50_000, timeout=60)
         return None
 
     def _search_pexels_photo(self, query: str, width: int, height: int) -> Optional[str]:
         import requests
         headers = {"Authorization": self.config.pexels_api_key}
         orientation = "portrait" if height > width else "landscape"
-        url = f"https://api.pexels.com/v1/search?query={query}&per_page=3&orientation={orientation}"
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = requests.get(
+            "https://api.pexels.com/v1/search",
+            params={"query": query, "per_page": 3, "orientation": orientation},
+            headers=headers, timeout=10,
+        )
         if resp.status_code == 200:
             photos = resp.json().get("photos", [])
             if photos:
                 src = photos[0].get("src", {}).get("large2x") or photos[0].get("src", {}).get("large")
                 if src:
                     out = self.cache_dir / f"pexels_img_{uuid.uuid4().hex[:8]}.jpg"
-                    r = requests.get(src, timeout=15)
-                    if r.status_code == 200:
-                        out.write_bytes(r.content)
-                        return str(out)
+                    return self._download(src, out, min_bytes=5_000)
         return None
 
     def _search_wikimedia(self, query: str) -> Optional[str]:
@@ -1165,16 +1204,16 @@ class MediaFetcher:
                 if info and "url" in info[0]:
                     img_url = info[0]["url"]
                     if img_url.lower().endswith((".jpg", ".jpeg", ".png")):
-                        out = self.cache_dir / f"wiki_{uuid.uuid4().hex[:8]}.jpg"
-                        r = requests.get(img_url, headers={"User-Agent": "VideoStudioPro/3.0"}, timeout=15)
-                        if r.status_code == 200:
-                            out.write_bytes(r.content)
-                            return str(out)
+                        ext = ".png" if img_url.lower().endswith(".png") else ".jpg"
+                        out = self.cache_dir / f"wiki_{uuid.uuid4().hex[:8]}{ext}"
+                        got = self._download(img_url, out, min_bytes=5_000,
+                                             headers={"User-Agent": "VideoStudioPro/3.0"})
+                        if got:
+                            return got
         return None
 
     def _generate_pollinations_image(self, prompt: str, width: int, height: int, style: str) -> Optional[str]:
         import urllib.parse
-        import requests
         enhanced = PromptEngine().enhance(prompt, preset=style)
         encoded = urllib.parse.quote(enhanced[:300])
         # Snap dimensions to valid multiples
@@ -1182,11 +1221,7 @@ class MediaFetcher:
         h = (height // 64) * 64
         url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&model=flux&nologo=true&seed={random.randint(1,999999)}"
         out = self.cache_dir / f"flux_{uuid.uuid4().hex[:8]}.jpg"
-        resp = requests.get(url, timeout=30)
-        if resp.status_code == 200 and len(resp.content) > 10000:
-            out.write_bytes(resp.content)
-            return str(out)
-        return None
+        return self._download(url, out, min_bytes=10_000, timeout=60)
 
     def generate_nano_banana_frame(self, prompt: str, width: int = 1920, height: int = 1080, style: str = "Hyper-realistic") -> str:
         """Generates a stunning photorealistic 4K scene frame / visual pic without paid tokens or billing."""

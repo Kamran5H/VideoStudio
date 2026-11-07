@@ -1166,14 +1166,32 @@ def resume_all_interrupted_jobs_btn() -> str:
     STUDIO.queue._auto_resume_interrupted_jobs()
     return "🔄 Interrupted jobs restored & resumed!"
 
+CLEAR_SECRET = "-"
+
+
+def merge_secret(current: str, submitted: Optional[str]) -> str:
+    """Secret fields are never pre-filled in the page, so an empty submission
+    means "keep the saved value"; a single '-' clears it."""
+    value = (submitted or "").strip()
+    if not value:
+        return current
+    return "" if value == CLEAR_SECRET else value
+
+
+def secret_placeholder(current: str) -> str:
+    return (f"Saved — leave blank to keep, '{CLEAR_SECRET}' to remove"
+            if current else "Not set")
+
+
 def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: str, gemini_k: str) -> str:
-    STUDIO.config.colab_url = colab_url.strip()
-    STUDIO.config.hf_token = hf_tok.strip()
-    STUDIO.config.pexels_api_key = pexels_k.strip()
-    STUDIO.config.pixabay_api_key = pixabay_k.strip()
-    STUDIO.config.gemini_api_key = gemini_k.strip()
-    STUDIO.config.save()
-    return "✅ Configuration & API Keys saved successfully!"
+    cfg = STUDIO.config
+    cfg.colab_url = (colab_url or "").strip()
+    cfg.hf_token = merge_secret(cfg.hf_token, hf_tok)
+    cfg.pexels_api_key = merge_secret(cfg.pexels_api_key, pexels_k)
+    cfg.pixabay_api_key = merge_secret(cfg.pixabay_api_key, pixabay_k)
+    cfg.gemini_api_key = merge_secret(cfg.gemini_api_key, gemini_k)
+    cfg.save()
+    return "✅ Settings saved to studio_config.json (git-ignored; stays on this computer)."
 
 def open_videos_folder() -> None:
     v_dir = DEFAULT_OUTPUT_DIR / "videos"
@@ -1190,7 +1208,7 @@ def read_system_logs() -> str:
             content = log_file.read_text(encoding="utf-8", errors="replace")
             tail = content.splitlines()[-50:]
             if tail:
-                return "\n".join(tail)
+                return redact_sensitive_text("\n".join(tail))
         except Exception:
             pass
     return "Studio ready. Logs streaming..."
@@ -1465,20 +1483,24 @@ def build_app() -> gr.Blocks:
                     # Column 1: API Credentials
                     with gr.Column():
                         gr.Markdown("### 🔌 Cloud GPU & AI Credentials")
-                        cfg_gemini = gr.Textbox(label="Gemini API Key (Pro Plan Active / Zero-Billing)", value=STUDIO.config.gemini_api_key, type="password")
-                        cfg_colab = gr.Textbox(label="Google Colab Worker URL (*.gradio.live)", value=STUDIO.config.colab_url)
-                        cfg_pexels = gr.Textbox(label="Pexels API Key (HD Stock Footage)", value=STUDIO.config.pexels_api_key, type="password")
-                        cfg_pixabay = gr.Textbox(label="Pixabay API Key (Stock Media)", value=STUDIO.config.pixabay_api_key, type="password")
-                        cfg_hf = gr.Textbox(label="Hugging Face Token (ZeroGPU)", value=STUDIO.config.hf_token, type="password")
+                        # Saved secrets are never sent to the browser; the
+                        # placeholder only says whether one is stored.
+                        cfg = STUDIO.config
+                        cfg_gemini = gr.Textbox(label="Gemini API Key", value="", placeholder=secret_placeholder(cfg.gemini_api_key), type="password")
+                        cfg_colab = gr.Textbox(label="Google Colab Worker URL (*.gradio.live)", value=cfg.colab_url)
+                        cfg_pexels = gr.Textbox(label="Pexels API Key (HD Stock Footage)", value="", placeholder=secret_placeholder(cfg.pexels_api_key), type="password")
+                        cfg_pixabay = gr.Textbox(label="Pixabay API Key (Stock Media)", value="", placeholder=secret_placeholder(cfg.pixabay_api_key), type="password")
+                        cfg_hf = gr.Textbox(label="Hugging Face Token (ZeroGPU)", value="", placeholder=secret_placeholder(cfg.hf_token), type="password")
                         save_cfg_btn = gr.Button("💾 Save API Keys & Settings", variant="primary")
                         save_msg = gr.Markdown("")
 
                         gr.HTML("""
                         <div class='hw-badge' style='margin-top:12px; border-color:rgba(56,189,248,0.3); color:#38BDF8;'>
-                          <b>Zero-Billing & Continuous Execution:</b><br>
-                          • Model: Gemini 2.5 Flash / 1.5 Flash (Pro Plan Included)<br>
-                          • Crash Recovery: Atomic per-scene checkpoints saved to disk<br>
-                          • Cost to user: <b>$0.00 / Zero token billing</b>
+                          <b>How credits are used:</b><br>
+                          • Prompt/script AI: Gemini Flash models (set GEMINI_MODELS to change); usage counts
+                            against your Google AI quota and may be billed on paid tiers<br>
+                          • Without a key: free Pollinations text, then an offline template<br>
+                          • Crash recovery: per-chunk / per-scene checkpoints saved to disk
                         </div>
                         """)
 

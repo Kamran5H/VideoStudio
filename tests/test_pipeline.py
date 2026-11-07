@@ -145,6 +145,63 @@ class PureHelperTests(unittest.TestCase):
         self.assertIn("in Urdu", captured["contents"])
 
 
+class NetworkHardeningTests(unittest.TestCase):
+    def test_gemini_models_env_override(self):
+        with patch.dict(os.environ, {"GEMINI_MODELS": " a , b ,"}):
+            self.assertEqual(vs.gemini_models(), ["a", "b"])
+        with patch.dict(os.environ, {"GEMINI_MODELS": ""}):
+            self.assertNotIn("gemini-1.5-flash", vs.gemini_models())
+
+    def test_failed_or_tiny_download_leaves_no_file(self):
+        class Resp:
+            def __init__(self, status, body, ctype="video/mp4"):
+                self.status, self.body, self.headers = status, body, {"Content-Type": ctype}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def raise_for_status(self):
+                if self.status >= 400:
+                    raise RuntimeError(f"HTTP {self.status}")
+
+            def iter_content(self, chunk_size):
+                yield self.body
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "clip.mp4"
+            for resp in (Resp(500, b"x" * 5000), Resp(200, b"x" * 10), Resp(200, b"<html>" * 999, "text/html")):
+                with patch("requests.get", return_value=resp):
+                    self.assertIsNone(vs.MediaFetcher._download("https://e/x?key=SECRET", out, min_bytes=100))
+                self.assertEqual(list(Path(tmp).iterdir()), [])
+            with patch("requests.get", return_value=Resp(200, b"x" * 500)):
+                self.assertEqual(vs.MediaFetcher._download("https://e/x", out, min_bytes=100), str(out))
+            self.assertEqual(out.stat().st_size, 500)
+
+    def test_pixabay_key_is_not_built_into_url(self):
+        cfg = vs.StudioConfig(pixabay_api_key="PIXKEY")
+        fetcher = vs.MediaFetcher(cfg)
+        calls = []
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {"hits": []}
+
+        def fake_get(url, **kw):
+            calls.append((url, kw))
+            return R()
+
+        with patch("requests.get", fake_get):
+            fetcher._search_pixabay_video("ocean waves")
+        url, kw = calls[0]
+        self.assertNotIn("PIXKEY", url)
+        self.assertEqual(kw["params"]["key"], "PIXKEY")
+
+
 class BackendLoopTests(unittest.TestCase):
     def test_failed_backend_does_not_corrupt_next_chunk_width(self):
         """Regression: `w = quota_wait_seconds(...)` overwrote the clip width."""

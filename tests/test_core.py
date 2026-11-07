@@ -321,6 +321,22 @@ class VideoStudioCoreTests(unittest.TestCase):
         finally:
             queue.is_worker = is_worker
 
+    def test_settings_never_prefill_saved_secrets(self):
+        cfg = app.STUDIO.config
+        saved = (cfg.gemini_api_key, cfg.hf_token, cfg.pexels_api_key, cfg.pixabay_api_key)
+        cfg.gemini_api_key = "SECRET-GEMINI-KEY"
+        try:
+            with patch.object(cfg, "save"):
+                config_json = json.dumps(app.build_app().config, default=str)
+                self.assertNotIn("SECRET-GEMINI-KEY", config_json)
+                self.assertEqual(app.merge_secret("old", ""), "old")
+                self.assertEqual(app.merge_secret("old", "  new "), "new")
+                self.assertEqual(app.merge_secret("old", app.CLEAR_SECRET), "")
+                app.save_api_credentials("", "", "", "", "")
+                self.assertEqual(cfg.gemini_api_key, "SECRET-GEMINI-KEY")
+        finally:
+            (cfg.gemini_api_key, cfg.hf_token, cfg.pexels_api_key, cfg.pixabay_api_key) = saved
+
     def test_invalid_worker_lock_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = object.__new__(JobQueue)

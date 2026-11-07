@@ -20,10 +20,12 @@ def main() -> int:
 
     from google import genai
 
+    from video_studio import gemini_models
+
     client = genai.Client(api_key=key)
     try:
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=gemini_models()[0],
             contents=(
                 'You are a Veo 3 cinematic prompt director. Expand: '
                 '"Golden eagle soaring in mountains" into 1 cinematic prompt sentence.'
