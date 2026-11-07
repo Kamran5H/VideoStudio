@@ -1,128 +1,109 @@
-# 🎥 AI Video Generation Studio
+# 🎥 VideoStudio
 
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://github.com/Kamran5H/VideoStudio)
-[![UI: Gradio](https://img.shields.io/badge/UI-Gradio%20Modern%20Studio-FF7C00?style=for-the-badge&logo=gradio&logoColor=white)](https://gradio.app/)
-[![Models](https://img.shields.io/badge/Generative%20Models-Wan2.1%20%7C%20LTX--Video-8B5CF6?style=for-the-badge)](https://github.com/Kamran5H/VideoStudio)
-[![Acceleration](https://img.shields.io/badge/Acceleration-Zero--Cost%20Cloud%20GPU%20Bridge-10B981?style=for-the-badge)](https://github.com/Kamran5H/VideoStudio)
+[![UI: Gradio 6](https://img.shields.io/badge/UI-Gradio%206-FF7C00?style=for-the-badge&logo=gradio&logoColor=white)](https://gradio.app/)
+[![CI](https://github.com/Kamran5H/VideoStudio/actions/workflows/ci.yml/badge.svg)](https://github.com/Kamran5H/VideoStudio/actions/workflows/ci.yml)
 
-**High-fidelity AI Text-to-Video and Image-to-Video generation studio featuring a Gradio interface and zero-cost cloud GPU worker bridge.**
-
-[Features](#-key-features) • [Architecture](#-architecture) • [Cloud Acceleration](#-free-cloud-gpu-acceleration) • [Installation](#-installation) • [License](#-license)
+**A local Gradio studio that turns a prompt into an AI video clip, or a script into a narrated, subtitled storyboard video. GPU work runs on free cloud backends.**
 
 </div>
 
 ---
 
-## 🌟 Executive Overview
+## What it does
 
-**VideoStudio** is a state-of-the-art AI video synthesis suite that enables creators, developers, and researchers to generate cinematic 1080p and 4K video clips directly from text prompts or still images. Engineered in Python with a rich **Gradio UI**, VideoStudio bridges local workstation controls with **free cloud GPU backends** (e.g. Google Colab T4/A100) to render state-of-the-art diffusion models (Wan 2.1, LTX-Video) without requiring a multi-thousand-dollar local GPU.
+VideoStudio runs on your computer, but the heavy diffusion work is sent to free cloud GPUs. FFmpeg then assembles the finished video on your machine.
 
----
+**🌟 AI Video tab** (text-to-video):
+1. **Prompt enhancement.** Gemini (if you set a key) rewrites the prompt. If not, a free Pollinations text model does it, and an offline style template is the last fallback.
+2. **Generation in 5-second chunks.** Each chunk is chained to the next through its last frame. Backends are tried in order:
+   - your own **Colab T4 worker** running Wan2.1-T2V-1.3B ([`colab_worker.ipynb`](colab_worker.ipynb))
+   - **LTX-Video** (HF ZeroGPU Space, also supports image-to-video)
+   - **CogVideoX-5B** (HF Space)
+   - the public **Wan2.1-14B** Space queue
+3. **When free GPU quota runs out**, the job waits and resumes by itself. Finished chunks are checkpointed to disk, so nothing is re-generated. If every backend is genuinely down, the studio uses stock footage or an AI still image with **Ken Burns** motion instead.
+4. **Post-processing with FFmpeg:** crossfades, optional 60 fps motion interpolation, and an aspect-preserving Lanczos **upscale** to 720p, 1080p or 4K.
+5. **Audio and output:** **Edge-TTS** narration (gTTS as fallback) in 10 languages, background music with ducking under the voice, word-timed **SRT subtitles** (optionally translated and burned in), plus an optional watermark.
 
-## 🚀 Key Features
+**📜 Storyboard tab** (script-to-video). You write, or have Gemini draft, `Visual:` / `VO:` lines. Each scene gets:
+- a stock clip from Pexels or Pixabay, or a still image from Wikimedia or Pollinations, animated with Ken Burns motion
+- its own narration
 
-- **🎬 Multi-Modal Video Synthesis**:
-  - **Text-to-Video (T2V)**: Generates fluid, temporally coherent video sequences from descriptive natural language prompts.
-  - **Image-to-Video (I2V)**: Animates still photographs, digital art, or AI portraits with cinematic motion trajectories.
-- **⚡ Free Cloud GPU Acceleration (`colab_worker.ipynb`)**: Offload massive VRAM compute requirements to free Google Colab cloud instances via automated tunneling (Ngrok / Gradio link), keeping your local machine completely unburdened.
-- **🎨 Modern Gradio Interactive Studio**:
-  - Resolution controls (480p, 720p, 1080p)
-  - Frame rate configuration (24fps, 30fps) and duration sliders
-  - Guidance scale, motion bucket ID, and seed randomization
-  - Built-in video preview player with instant download
-- **🖥️ Turnkey Windows Launch**: Pre-configured `Start Video Studio.bat` and silent `run_videostudio.vbs` for one-click desktop initiation.
+Narration and subtitles are timed to each scene's on-screen slot, so they stay in sync across crossfades.
 
----
+> **Honest resolution note:** the free models generate at about 480p–720p. Higher quality tiers are **upscaled**, not native 4K.
 
-## 🏗️ Architecture
+## Requirements
 
-```mermaid
-flowchart LR
-    A[Creator: Text Prompt / Image] --> B[Local Gradio Studio: app.py]
-    B -->|Encrypted Remote Tunnel| C[Cloud GPU Worker: colab_worker.ipynb]
-    
-    subgraph Cloud Diffusion Engine
-        C --> D[Wan 2.1 / LTX-Video Pipeline]
-        D --> E[Temporal Attention & VAE Decoder]
-        E --> F[FFmpeg MP4 Encode]
-    end
-    
-    F -->|Return Video Stream| B
-    B --> G[(Local Video Export & Preview Player)]
-```
+- Python **3.10+**
+- **FFmpeg**: the system `ffmpeg` is used if it's on PATH; otherwise the binary bundled with `imageio-ffmpeg` (installed from `requirements.txt`). Burned-in subtitles need an FFmpeg build with libass.
+- Optional keys, all set in `.env` (see [`.env.example`](.env.example)) or in the **⚙️ Settings & System** tab:
 
----
+| Variable | Used for |
+|---|---|
+| `GEMINI_API_KEY` | Prompt enhancement and storyboard scripts (`GEMINI_MODELS` sets the model order) |
+| `HF_TOKEN` | Higher ZeroGPU quota on the Hugging Face Spaces |
+| `PEXELS_API_KEY`, `PIXABAY_API_KEY` | Stock footage and photos |
+| `VIDEOSTUDIO_OUTPUT_DIR` | Where renders go (keep it **outside OneDrive**: sync locks files mid-encode) |
 
-## 📁 Repository Structure
+Keys saved in the Settings tab go to `studio_config.json`, which is git-ignored. They are never sent back to the page.
 
-```text
-VideoStudio/
-├── app.py                      # Primary Gradio web studio interface
-├── video_studio.py             # Video generation pipeline orchestrator
-├── colab_worker.ipynb          # Cloud GPU worker notebook for free acceleration
-├── Wan2.1-main/                # Integrated Wan2.1 diffusion model codebase
-├── Start Video Studio.bat      # Windows one-click desktop launcher
-├── run_videostudio.vbs         # Silent background VBS launcher
-├── videostudio.ico             # High-resolution application icon
-├── requirements.txt            # Python dependencies
-├── .gitignore                  # Video cache and weights exclusions
-└── LICENSE                     # Open-source MIT License
-```
+## Install and run
 
----
-
-## ⚡ Installation
-
-### Prerequisites
-- Python 3.10 or higher
-- (Optional for local inference) NVIDIA GPU with 12GB+ VRAM or free Google Colab account
-
-### Setup
 ```bash
 git clone https://github.com/Kamran5H/VideoStudio.git
 cd VideoStudio
-
-# Setup virtual environment
 python -m venv .venv
-.venv\Scripts\activate
-
-# Install dependencies
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
+copy .env.example .env          # optional; macOS/Linux: cp
+python app.py                   # opens http://127.0.0.1:7860
 ```
 
-### Launch
+On Windows you can also double-click `Start Video Studio.bat`, or run `run_videostudio.vbs` for a silent background launch. `python video_studio.py --probe` prints hardware and backend diagnostics.
+
+### Optional: free Colab GPU worker
+1. Open [`colab_worker.ipynb`](colab_worker.ipynb) in Google Colab.
+2. Select a T4 GPU and run all cells.
+3. Paste the printed `*.gradio.live` URL into **⚙️ Settings & System → Google Colab Worker URL**.
+
+## Refresh and job recovery
+
+Jobs run in the local worker thread, not in the browser, so refreshing the page reconnects to the saved queue. Interrupted jobs resume from their last checkpoint when the studio restarts. Only one studio process at a time owns the queue; a second instance opens view-only.
+
+Creative form values are kept in the browser tab's session storage. API keys are never stored there.
+
+## Development
+
 ```bash
-# Start local studio
-python app.py
-
-# Or double-click "Start Video Studio.bat" on Windows
+pip install -r requirements-dev.txt
+ruff check .                                  # lint
+pyright app.py video_studio.py                # type check
+python -m unittest discover -s tests -v       # offline tests (run real FFmpeg, no network)
 ```
 
-## 🧪 Verification
+Tests write to a temporary output folder, never your `outputs/`. `test_verify.py` and `test_gemini_features.py` are opt-in **live** smoke checks: they use the network and API quota, so CI does not run them.
 
-Run the offline verification suite with:
+## Repository layout
 
-```bash
-python -m unittest discover -s tests -v
+```text
+app.py                 Gradio UI (tabs, live job cards, draft restore)
+video_studio.py        Pipeline: backends, media fetch, TTS, subtitles, FFmpeg engine, job queue
+colab_worker.ipynb     Free Colab GPU worker exposing /generate for Wan2.1-T2V-1.3B
+tests/                 Offline unit and FFmpeg regression tests
+Wan2.1-main/           Unmodified upstream Wan2.1 reference copy (Apache-2.0); not imported by the app
+Start Video Studio.bat / run_videostudio.vbs   Windows launchers
 ```
-
-`test_gemini_features.py` and `test_verify.py` are opt-in live smoke checks; they may use network services, API quota, and local media processing, so they are not run during automated test discovery.
-
-## 🔄 Refresh & Job Recovery
-
-Submitted video jobs run in the local studio worker, not in the browser page. Refreshing the page reconnects to the saved job queue and restores its status and completed video; the current phase, queue position, or quota retry window is shown in the shared status panel above the tabs. Active work uses an indeterminate progress bar rather than an invented percentage or ETA. When no job is running, the latest completed result is reopened in the tab that created it.
-
-Creative form values and the selected tab are auto-saved in the current browser tab's session storage, so they survive a page refresh but are cleared when that browser tab session ends. Unsaved API-key edits are never stored in browser state. Use **Clear saved draft** to reset creative fields without cancelling jobs or removing videos.
 
 ---
 
 ## 📜 License
 
-This project is open-source and released under the [MIT License](LICENSE).  
-Copyright (c) 2024-2026 **Kamran Ashraf**.
+This project is released under the [MIT License](LICENSE).
+Copyright (c) 2024-2026 **Kamran Ashraf**. `Wan2.1-main/` keeps its own Apache-2.0 license.
 
 ---
 
@@ -142,4 +123,3 @@ Copyright (c) 2024-2026 **Kamran Ashraf**.
 [![Contact Email](https://img.shields.io/badge/Email-chkamran32b%40gmail.com-EA4335?style=flat-square&logo=gmail&logoColor=white)](mailto:chkamran32b@gmail.com)
 
 </div>
-
