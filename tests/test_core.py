@@ -337,6 +337,23 @@ class VideoStudioCoreTests(unittest.TestCase):
         finally:
             (cfg.gemini_api_key, cfg.hf_token, cfg.pexels_api_key, cfg.pixabay_api_key) = saved
 
+    def test_job_settings_are_sanitized_from_raw_api_input(self):
+        sett = app.build_ai_settings(
+            "  a prompt  ", None, "NotAStyle", "8K", "99:1", 10_000, "Klingon", "Robot",
+            None, "Polka", 1, "Comic Sans", "Elvish", 0, "", None, None,
+        )
+        self.assertEqual(sett.prompt, "a prompt")
+        self.assertEqual((sett.style_preset, sett.quality, sett.aspect_ratio), ("Cinematic", "1080p", "16:9"))
+        self.assertEqual(sett.duration, 60)          # clamped to the UI maximum
+        self.assertEqual((sett.language, sett.voice_gender, sett.music_mood), ("English", "Female", "Ambient"))
+        self.assertEqual((sett.subtitle_style, sett.translate_lang), ("Classic White", "None"))
+        self.assertEqual(sett.seed, -1)              # empty Number field
+        self.assertIs(sett.subtitles_enabled, True)
+        self.assertEqual(app.build_ai_settings("p", "", "Anime", "720p", "9:16", float("nan"), "Urdu", "Male",
+                                               "", "Calm", True, "Neon Glow", "None", False, True, False, 42.7).seed, 42)
+        story = app.build_story_settings(None, "Visual: x\nVO: y", "X", "1:1", "Urdu", "?", "?", True, "?", 0, 1)
+        self.assertEqual((story.prompt, story.aspect_ratio, story.language), ("Storyboard Scene", "1:1", "Urdu"))
+
     def test_invalid_worker_lock_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = object.__new__(JobQueue)

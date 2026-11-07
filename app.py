@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import gradio as gr
 
@@ -34,6 +34,7 @@ from video_studio import (
     JobStatus,
     Stage,
     VideoStudio,
+    log,
 )
 
 STUDIO = VideoStudio()
@@ -1035,6 +1036,71 @@ def sync_restored_job_outputs(
         story_video_path or last_story_video,
     )
 
+def _choice(value: Any, options: List[str], default: str) -> str:
+    """Accept only known option values (the Gradio API can be called directly)."""
+    return value if value in options else default
+
+
+def _number(value: Any, default: float, lo: float, hi: float) -> float:
+    """Finite number clamped to [lo, hi]; empty/garbage input -> default."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return max(lo, min(hi, number))
+
+
+def _text(value: Any, limit: int) -> str:
+    return (value if isinstance(value, str) else "").strip()[:limit]
+
+
+def build_ai_settings(
+    prompt, negative, preset, quality, aspect, duration, language, gender,
+    custom_script, music, burn_subs, sub_style, tr_lang, interp_60, anti_fp, watermark, seed,
+) -> JobSettings:
+    return JobSettings(
+        mode="ai_video",
+        prompt=_text(prompt, DRAFT_TEXT_LIMITS["ai_prompt"]),
+        negative_prompt=_text(negative, DRAFT_TEXT_LIMITS["ai_negative"]),
+        style_preset=_choice(preset, STYLES_LIST, "Cinematic"),
+        quality=_choice(quality, QUALITY_TIERS, "1080p"),
+        aspect_ratio=_choice(aspect, list(ASPECT_SIZES), "16:9"),
+        duration=_number(duration, 6.0, *DRAFT_NUMERIC_BOUNDS["ai_duration"][:2]),
+        language=_choice(language, LANGUAGES, "English"),
+        voice_gender=_choice(gender, ["Male", "Female"], "Female"),
+        voice_script=_text(custom_script, DRAFT_TEXT_LIMITS["ai_script"]),
+        music_mood=_choice(music, MUSIC_MOODS, "Ambient"),
+        subtitles_enabled=bool(burn_subs),
+        subtitle_style=_choice(sub_style, SUB_STYLES_LIST, "Classic White"),
+        translate_lang=_choice(tr_lang, SUBTITLE_LANGS, "None"),
+        interpolate_60fps=bool(interp_60),
+        anti_fingerprint=bool(anti_fp),
+        watermark_logo=bool(watermark),
+        seed=int(_number(seed, -1, *DRAFT_NUMERIC_BOUNDS["ai_seed"][:2])),
+    )
+
+
+def build_story_settings(
+    topic, script_text, preset, aspect, language, gender, music, burn_subs, sub_style, watermark, anti_fp,
+) -> JobSettings:
+    return JobSettings(
+        mode="script_story",
+        prompt=_text(topic, DRAFT_TEXT_LIMITS["story_topic"]) or "Storyboard Scene",
+        script_text=_text(script_text, DRAFT_TEXT_LIMITS["story_script"]),
+        style_preset=_choice(preset, STYLES_LIST, "Cinematic"),
+        aspect_ratio=_choice(aspect, list(ASPECT_SIZES), "16:9"),
+        language=_choice(language, LANGUAGES, "English"),
+        voice_gender=_choice(gender, ["Male", "Female"], "Male"),
+        music_mood=_choice(music, MUSIC_MOODS, "Dramatic"),
+        subtitles_enabled=bool(burn_subs),
+        subtitle_style=_choice(sub_style, SUB_STYLES_LIST, "Neon Glow"),
+        watermark_logo=bool(watermark),
+        anti_fingerprint=bool(anti_fp),
+    )
+
+
 def generate_ai_video_live(
     prompt, negative, preset, quality, aspect, duration, language, gender,
     custom_script, music, burn_subs, sub_style, tr_lang, interp_60, anti_fp, watermark, seed
@@ -1042,30 +1108,13 @@ def generate_ai_video_live(
     if not STUDIO.queue.is_worker:
         yield "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only.", "<div class='q-card'>Queue is read-only in this instance.</div>", None, None, ""
         return
-    if not prompt.strip():
+    sett = build_ai_settings(
+        prompt, negative, preset, quality, aspect, duration, language, gender,
+        custom_script, music, burn_subs, sub_style, tr_lang, interp_60, anti_fp, watermark, seed,
+    )
+    if not sett.prompt:
         yield "⚠️ Please enter a prompt first.", "<div class='q-card'><b>Enter a prompt</b> to generate 4K video.</div>", None, None, ""
         return
-
-    sett = JobSettings(
-        mode="ai_video",
-        prompt=prompt.strip(),
-        negative_prompt=negative.strip() if negative else "",
-        style_preset=preset,
-        quality=quality or "4K",
-        aspect_ratio=aspect or "16:9",
-        duration=float(duration),
-        language=language,
-        voice_gender=gender,
-        voice_script=custom_script.strip() if custom_script else "",
-        music_mood=music,
-        subtitles_enabled=burn_subs,
-        subtitle_style=sub_style,
-        translate_lang=tr_lang,
-        interpolate_60fps=interp_60,
-        anti_fingerprint=anti_fp,
-        watermark_logo=watermark,
-        seed=int(seed),
-    )
     job_id = STUDIO.queue.submit(sett)
 
     start_t = time.time()
@@ -1108,23 +1157,12 @@ def generate_storyboard_video_live(
     if not STUDIO.queue.is_worker:
         yield "⚠️ Another VideoStudio instance owns the job queue; this instance is view-only.", "<div class='q-card'>Queue is read-only in this instance.</div>", None, ""
         return
-    if not script_text.strip() and not topic.strip():
+    if not _text(script_text, 1) and not _text(topic, 1):
         yield "⚠️ Please enter a topic or script.", "<div class='q-card'><b>Enter a script</b> to build video.</div>", None, ""
         return
 
-    sett = JobSettings(
-        mode="script_story",
-        prompt=topic.strip() or "Storyboard Scene",
-        script_text=script_text.strip(),
-        style_preset=preset,
-        aspect_ratio=aspect or "16:9",
-        language=language,
-        voice_gender=gender,
-        music_mood=music,
-        subtitles_enabled=burn_subs,
-        subtitle_style=sub_style,
-        watermark_logo=watermark,
-        anti_fingerprint=anti_fp,
+    sett = build_story_settings(
+        topic, script_text, preset, aspect, language, gender, music, burn_subs, sub_style, watermark, anti_fp,
     )
     job_id = STUDIO.queue.submit(sett)
 
@@ -1205,10 +1243,15 @@ def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: 
 def open_videos_folder() -> None:
     v_dir = DEFAULT_OUTPUT_DIR / "videos"
     v_dir.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "win32":
-        os.startfile(str(v_dir))
-    else:
-        subprocess.Popen(["xdg-open", str(v_dir)])
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(v_dir))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(v_dir)])
+        else:
+            subprocess.Popen(["xdg-open", str(v_dir)])
+    except OSError as exc:      # headless box / no file manager: don't crash the UI event
+        log.warning("Could not open %s: %s", v_dir, exc)
 
 def read_system_logs() -> str:
     log_file = DEFAULT_OUTPUT_DIR / "logs" / "studio.log"
