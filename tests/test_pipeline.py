@@ -202,6 +202,92 @@ class NetworkHardeningTests(unittest.TestCase):
         self.assertEqual(kw["params"]["key"], "PIXKEY")
 
 
+def _bare_queue(tmp: str, studio=None) -> "vs.JobQueue":
+    import threading
+    q = object.__new__(vs.JobQueue)
+    q.queue_file = Path(tmp) / "jobs.json"
+    q._lock = threading.RLock()
+    q._jobs, q._cancelled_jobs = {}, set()
+    q._last_persist, q._paused, q._running = 0.0, False, True
+    q.studio = studio
+    return q
+
+
+class JobQueueRobustnessTests(unittest.TestCase):
+    def _run_once(self, q):
+        # Stop the worker loop the first time it would idle.
+        def stop(_):
+            q._running = False
+        with patch.object(vs.time, "sleep", side_effect=stop):
+            q._worker_loop()
+
+    def test_job_without_settings_fails_instead_of_spinning(self):
+        class Studio:
+            config = vs.StudioConfig()
+
+            def execute_job(self, *a):
+                raise AssertionError("must not run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            q = _bare_queue(tmp, Studio())
+            q._jobs["x"] = vs.JobStatus(job_id="x", settings=None)
+            self._run_once(q)
+            self.assertEqual(q._jobs["x"].stage, vs.Stage.FAILED)
+
+    def test_pipeline_returning_without_result_is_failed(self):
+        class Studio:
+            config = vs.StudioConfig()
+
+            def execute_job(self, *a):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            q = _bare_queue(tmp, Studio())
+            q._jobs["x"] = vs.JobStatus(job_id="x", settings=vs.JobSettings(job_id="x"))
+            self._run_once(q)
+            self.assertEqual(q._jobs["x"].stage, vs.Stage.FAILED)
+
+    def test_quota_deferrals_are_capped(self):
+        class Studio:
+            config = vs.StudioConfig(max_deferrals_per_job=2)
+
+            def execute_job(self, *a):
+                raise vs.QuotaExhausted(60)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            q = _bare_queue(tmp, Studio())
+            job = vs.JobStatus(job_id="x", settings=vs.JobSettings(job_id="x"))
+            q._jobs["x"] = job
+            self._run_once(q)
+            self.assertEqual((job.stage, job.deferrals), (vs.Stage.QUEUED, 1))
+            job.not_before = 0
+            job.deferrals = 2
+            q._running = True
+            self._run_once(q)
+            self.assertEqual(job.stage, vs.Stage.FAILED)
+
+    def test_one_bad_entry_does_not_drop_the_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            q = _bare_queue(tmp)
+            q.queue_file.write_text(
+                '{"good": {"stage": "Completed", "settings": {"prompt": "p"}, "deferrals": 3},'
+                ' "bad": "not-an-object", "worse": {"progress": "NaN-ish"}}',
+                encoding="utf-8",
+            )
+            q._load()
+            self.assertIn("good", q._jobs)
+            self.assertEqual(q._jobs["good"].deferrals, 3)
+            self.assertNotIn("bad", q._jobs)
+
+    def test_corrupt_queue_file_is_kept_aside(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            q = _bare_queue(tmp)
+            q.queue_file.write_text("{truncated", encoding="utf-8")
+            q._load()
+            self.assertEqual(q._jobs, {})
+            self.assertEqual(len(list(Path(tmp).glob("jobs.json.corrupt-*"))), 1)
+
+
 class HFClientTests(unittest.TestCase):
     def test_token_is_passed_with_the_keyword_the_client_accepts(self):
         try:

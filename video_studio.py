@@ -368,7 +368,11 @@ class StudioConfig:
             self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
 
     def save(self, path: Path = CONFIG_PATH) -> None:
-        path.write_text(json.dumps(dataclasses.asdict(self), indent=2), encoding="utf-8")
+        # Atomic: a crash mid-write must not leave a truncated config (which
+        # load() would then discard, silently resetting every saved key).
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(dataclasses.asdict(self), indent=2), encoding="utf-8")
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> StudioConfig:
@@ -1883,6 +1887,7 @@ class JobStatus:
     settings: Optional[JobSettings] = None
     retries: int = 0                           # non-quota failures so far
     not_before: float = 0.0                    # deferred-until epoch (quota/network)
+    deferrals: int = 0                         # quota/network deferrals so far
 
 class JobQueue:
     """Thread-safe, persistent batch job queue with auto-resume and crash recovery."""
@@ -1969,40 +1974,62 @@ class JobQueue:
             pass
 
     def _load(self):
-        if self.queue_file.exists():
+        """Load the persisted queue, one job at a time.
+
+        A single malformed entry is skipped instead of aborting the whole load
+        (the next save would otherwise overwrite every job with an empty
+        queue). If the file itself is unreadable it is moved aside to
+        ``jobs.json.corrupt-<time>`` so nothing is silently destroyed.
+        """
+        if not self.queue_file.exists():
+            return
+        try:
+            data = json.loads(self.queue_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            backup = self.queue_file.with_name(f"{self.queue_file.name}.corrupt-{int(time.time())}")
             try:
-                data = json.loads(self.queue_file.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    data = {j.get("job_id", str(i)): j for i, j in enumerate(data) if isinstance(j, dict)}
-                elif not isinstance(data, dict):
-                    data = {}
-                known_fields = {f.name for f in dataclasses.fields(JobSettings)}
-                for j_id, j_data in data.items():
-                    sett_data = j_data.get("settings", {})
-                    if isinstance(sett_data, dict):
-                        filtered_sett = {k: v for k, v in sett_data.items() if k in known_fields}
-                        sett = JobSettings(**filtered_sett) if filtered_sett else None
-                    else:
-                        sett = None
-                    stage = Stage.from_str(j_data.get("stage", "Queued"))
-                    if stage == Stage.CANCELLED:
-                        self._cancelled_jobs.add(j_id)
-                    self._jobs[j_id] = JobStatus(
-                        job_id=j_id,
-                        stage=stage,
-                        progress=j_data.get("progress", 0.0),
-                        message=j_data.get("message", ""),
-                        video_path=j_data.get("video_path"),
-                        srt_path=j_data.get("srt_path"),
-                        thumbnail_path=j_data.get("thumbnail_path"),
-                        error=j_data.get("error"),
-                        backend_used=j_data.get("backend_used"),
-                        settings=sett,
-                        retries=int(j_data.get("retries", 0) or 0),
-                        not_before=float(j_data.get("not_before", 0.0) or 0.0),
-                    )
+                self.queue_file.replace(backup)
+                log.warning("Queue file unreadable (%s); moved to %s", e, backup.name)
+            except OSError:
+                log.warning("Queue file unreadable (%s)", e)
+            return
+        if isinstance(data, list):
+            data = {j.get("job_id", str(i)): j for i, j in enumerate(data) if isinstance(j, dict)}
+        elif not isinstance(data, dict):
+            data = {}
+        for j_id, j_data in data.items():
+            try:
+                self._jobs[str(j_id)] = self._job_from_dict(str(j_id), j_data)
+                if self._jobs[str(j_id)].stage == Stage.CANCELLED:
+                    self._cancelled_jobs.add(str(j_id))
             except Exception as e:
-                log.warning("Failed to load persistent queue: %s", e)
+                log.warning("Skipping unreadable queue entry %s: %s", j_id, e)
+
+    @staticmethod
+    def _job_from_dict(j_id: str, j_data: Any) -> JobStatus:
+        if not isinstance(j_data, dict):
+            raise TypeError("entry is not an object")
+        known_fields = {f.name for f in dataclasses.fields(JobSettings)}
+        sett_data = j_data.get("settings")
+        sett = None
+        if isinstance(sett_data, dict):
+            filtered = {k: v for k, v in sett_data.items() if k in known_fields}
+            sett = JobSettings(**filtered) if filtered else None
+        return JobStatus(
+            job_id=j_id,
+            stage=Stage.from_str(j_data.get("stage", "Queued")),
+            progress=float(j_data.get("progress", 0.0) or 0.0),
+            message=str(j_data.get("message", "") or ""),
+            video_path=j_data.get("video_path"),
+            srt_path=j_data.get("srt_path"),
+            thumbnail_path=j_data.get("thumbnail_path"),
+            error=j_data.get("error"),
+            backend_used=j_data.get("backend_used"),
+            settings=sett,
+            retries=int(j_data.get("retries", 0) or 0),
+            not_before=float(j_data.get("not_before", 0.0) or 0.0),
+            deferrals=int(j_data.get("deferrals", 0) or 0),
+        )
 
     def _auto_resume_interrupted_jobs(self):
         """Recover and continue any job interrupted by a shutdown/crash/browser
@@ -2018,6 +2045,7 @@ class JobQueue:
                     js.stage = Stage.QUEUED
                     js.not_before = 0.0
                     js.retries = 0
+                    js.deferrals = 0
                     js.message = "Restored from previous session. Resuming from last saved checkpoint..."
                     has_pending = True
         if has_pending:
@@ -2046,6 +2074,7 @@ class JobQueue:
                     "settings": dataclasses.asdict(js.settings) if js.settings else None,
                     "retries": js.retries,
                     "not_before": js.not_before,
+                    "deferrals": js.deferrals,
                 }
             payload = json.dumps(data, indent=2)
             tmp = self.queue_file.with_suffix(f".{os.getpid()}.tmp")
@@ -2104,6 +2133,7 @@ class JobQueue:
             if js:
                 js.stage = Stage.QUEUED
                 js.retries = 0
+                js.deferrals = 0
                 js.not_before = 0.0
                 js.error = None
                 js.message = "Re-queued. Resuming from checkpoint..."
@@ -2149,12 +2179,28 @@ class JobQueue:
                 time.sleep(1.0)
                 continue
 
+            if pending_job.settings is None:
+                # Nothing to run (e.g. a hand-edited/legacy queue entry). Without
+                # this it would stay QUEUED and be re-picked in a tight loop.
+                self._fail(pending_job, "Job has no saved settings and cannot be run.")
+                continue
+
             try:
                 self.studio.execute_job(pending_job, self._progress_callback)
+                if (pending_job.stage not in (Stage.DONE, Stage.FAILED, Stage.CANCELLED)
+                        and not self.is_cancelled(pending_job.job_id)):
+                    # Pipeline returned without a result: never leave it QUEUED,
+                    # or the worker would spin on it forever.
+                    self._fail(pending_job, "Pipeline finished without producing a video.")
             except QuotaExhausted as quota:
                 # Free-GPU quota / transient network — defer and auto-resume when
                 # the window replenishes. Finished chunks stay on disk, so the
-                # resume is cheap. This does NOT count as a hard failure.
+                # resume is cheap. Capped so a job cannot wait forever.
+                pending_job.deferrals += 1
+                cap = int(getattr(self.studio.config, "max_deferrals_per_job", 48))
+                if pending_job.deferrals > cap:
+                    self._fail(pending_job, f"Gave up after {cap} quota/network waits: {quota.reason}")
+                    continue
                 pending_job.stage = Stage.QUEUED
                 pending_job.not_before = time.time() + max(30, int(quota.wait_seconds))
                 at = time.strftime("%H:%M", time.localtime(pending_job.not_before))
@@ -2185,6 +2231,13 @@ class JobQueue:
                 pending_job.not_before = time.time() + 10  # brief backoff, unblocks queue
                 pending_job.message = f"⏳ Retry {pending_job.retries}/{cap}: {str(e)[:60]}"
                 self._save(force=True)
+
+    def _fail(self, job: JobStatus, reason: str) -> None:
+        job.stage = Stage.FAILED
+        job.error = reason[:500]
+        job.message = f"❌ {reason[:120]}"
+        log.error("Job %s failed: %s", job.job_id, reason)
+        self._save(force=True)
 
     def _progress_callback(self, job_id: str, stage: Stage, progress: float, msg: str, **kwargs):
         if self.is_cancelled(job_id):
