@@ -288,6 +288,35 @@ class JobQueueRobustnessTests(unittest.TestCase):
             self.assertEqual(len(list(Path(tmp).glob("jobs.json.corrupt-*"))), 1)
 
 
+class BackendTimeoutTests(unittest.TestCase):
+    def test_hung_remote_call_times_out_as_transient(self):
+        import concurrent.futures
+
+        class Job:
+            cancelled = False
+
+            def result(self, timeout=None):
+                raise concurrent.futures.TimeoutError()
+
+            def cancel(self):
+                Job.cancelled = True
+
+        class Client:
+            def submit(self, *a, **k):
+                return Job()
+
+        with self.assertRaises(TimeoutError) as ctx:
+            vs.ColabBackend._predict(Client(), "p", api_name="/generate", timeout=1)
+        self.assertTrue(Job.cancelled)
+        self.assertTrue(vs.is_transient_error(str(ctx.exception)))
+
+    def test_free_text_reply_validation(self):
+        self.assertTrue(vs.looks_like_prompt("A slow aerial shot over misty mountains at dawn."))
+        for bad in ("", "short", "<html>502 Bad Gateway</html>" * 3, '{"error": "rate limited"}',
+                    "Error: too many requests, please slow down and retry later", "x" * 5000):
+            self.assertFalse(vs.looks_like_prompt(bad), bad[:30])
+
+
 class HFClientTests(unittest.TestCase):
     def test_token_is_passed_with_the_keyword_the_client_accepts(self):
         try:
@@ -423,6 +452,37 @@ class FFmpegPipelineTests(unittest.TestCase):
                 self.skipTest("this ffmpeg build lacks libass")
             raise
         self.assertGreater(vs.ffprobe_duration(out), 0.5)
+
+    def test_synth_music_is_fast_and_full_length(self):
+        import time as _t
+        out = self.tmp / "bgm.mp3"
+        start = _t.time()
+        vs.AudioEngine().generate_synth_music("Dramatic", 20.0, out)
+        self.assertLess(_t.time() - start, 10.0)
+        self.assertAlmostEqual(vs.ffprobe_duration(out), 20.0, delta=0.3)
+
+    def test_ken_burns_renders_exact_duration_from_one_frame(self):
+        img = self.tmp / "still.jpg"
+        vs.run_ffmpeg(["-f", "lavfi", "-i", "testsrc=size=640x360", "-frames:v", "1", str(img)])
+        for motion in ("zoom_in", "zoom_out", "pan_left", "pan_right"):
+            with self.subTest(motion=motion):
+                out = self.tmp / f"kb_{motion}.mp4"
+                vs.VideoEngine.image_to_video_ken_burns(img, 2.0, 320, 180, fps=24, motion_type=motion, out_path=out)
+                self.assertAlmostEqual(vs.ffprobe_duration(out), 2.0, delta=0.1)
+                self.assertEqual(vs.probe_video_size(out), (320, 180))
+
+    def test_voice_and_music_mix_keeps_narration_level(self):
+        vo = self.tmp / "vo.mp3"
+        vs.run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=300:duration=3", str(vo)])
+        out = self.tmp / "mix.m4a"     # raw .aac (ADTS) durations are only bitrate estimates
+        vs.AudioEngine().mix_and_duck_audio(vo, "Calm", 4.0, out)
+        self.assertAlmostEqual(vs.ffprobe_duration(out), 4.0, delta=0.3)
+        proc = subprocess.run([vs.ffmpeg_exe(), "-hide_banner", "-i", str(out), "-af", "volumedetect",
+                               "-f", "null", "-"], capture_output=True, text=True, timeout=60)
+        import re as _re
+        peak = float(_re.search(r"max_volume:\s*(-?[\d.]+) dB", proc.stderr).group(1))
+        # sine source peaks at about -18 dBFS; amix normalization would push it to about -24.
+        self.assertGreater(peak, -21.0)
 
     def test_vo_timeline_concat_mixes_sample_formats(self):
         a = self.tmp / "a.mp3"

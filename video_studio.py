@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import dataclasses
 import json
 import logging
@@ -30,13 +31,11 @@ import queue
 import random
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import threading
 import time
 import uuid
-import wave
 import zlib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -516,7 +515,19 @@ class PromptEngine:
         extra = user_negative.strip()
         return f"{DEFAULT_NEGATIVE}, {extra}" if extra else DEFAULT_NEGATIVE
 
-DEFAULT_GEMINI_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+def looks_like_prompt(text: str) -> bool:
+    """Reject free-endpoint replies that are error pages, JSON, rate-limit
+    notices or essays rather than a single prompt."""
+    t = (text or "").strip()
+    if not (15 < len(t) <= 1500):
+        return False
+    if t[0] in "<{[":
+        return False
+    head = t[:120].lower()
+    return not any(m in head for m in ("error", "rate limit", "too many requests", "queue full", "unauthorized"))
+
+
+DEFAULT_GEMINI_MODELS =("gemini-2.5-flash", "gemini-2.5-flash-lite")
 
 
 def gemini_models() -> List[str]:
@@ -578,7 +589,7 @@ class FreeLLMPromptEnhancer:
             import requests
             q_enc = urllib.parse.quote(f"Expand into 50-word cinematic {style} video prompt: {clean_p}")
             resp = requests.get(f"https://text.pollinations.ai/{q_enc}", timeout=6)
-            if resp.status_code == 200 and len(resp.text.strip()) > 15:
+            if resp.status_code == 200 and looks_like_prompt(resp.text):
                 return resp.text.strip().replace('"', '')
         except Exception:
             pass
@@ -767,6 +778,24 @@ class GenerationBackend:
     name = "abstract"
     description = ""
     supports_image_conditioning = False
+    # Upper bound for one remote generation call. gradio_client.predict() has
+    # no timeout, so a dead Colab tunnel or stuck Space used to block the
+    # single worker thread — and every job behind it — forever.
+    PREDICT_TIMEOUT = 900
+
+    @classmethod
+    def _predict(cls, client: Any, *args: Any, timeout: Optional[float] = None, **kwargs: Any) -> Any:
+        limit = timeout or cls.PREDICT_TIMEOUT
+        job = client.submit(*args, **kwargs)
+        try:
+            return job.result(timeout=limit)
+        except (TimeoutError, concurrent.futures.TimeoutError) as exc:   # distinct classes on 3.10
+            try:
+                job.cancel()
+            except Exception:
+                pass
+            # "timed out" makes the queue treat it as transient (defer + retry).
+            raise TimeoutError(f"{cls.name}: no response within {int(limit)}s (timed out)") from exc
 
     def available(self) -> bool:
         return True
@@ -851,7 +880,8 @@ class ColabBackend(GenerationBackend):
         w, h = self._snap_wan13b(req.width, req.height)
         progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {req.steps} steps...")
         client = self._get_client()
-        result = client.predict(
+        result = self._predict(
+            client,
             req.prompt, req.negative_prompt, w, h,
             req.num_frames, req.steps, req.guidance, req.seed,
             api_name="/generate",
@@ -905,7 +935,7 @@ class LTXSpaceBackend(GenerationBackend):
             accepted = self._accepted_params(client, api_name)
             if accepted:
                 payload = {k: v for k, v in payload.items() if k in accepted}
-            return client.predict(api_name=api_name, **payload)
+            return self._predict(client, api_name=api_name, **payload)
 
         try:
             if req.init_image:
@@ -950,7 +980,8 @@ class CogVideoXBackend(GenerationBackend):
         progress("CogVideoX-5B: generating AI clip (720x480)...")
         client = self._get_client()
         try:
-            result = client.predict(
+            result = self._predict(
+                client,
                 prompt=req.prompt, image_input=None, video_input=None,
                 video_strength=0.8,
                 seed_value=req.seed if req.seed >= 0 else -1,
@@ -996,18 +1027,20 @@ class WanOfficialBackend(GenerationBackend):
         }
         accepted = self._accepted_params(client, "/t2v_generation_async")
         payload = {k: v for k, v in want.items() if not accepted or k in accepted}
-        sub_res = client.predict(api_name="/t2v_generation_async", **payload)
+        sub_res = self._predict(client, api_name="/t2v_generation_async", timeout=120, **payload)
         task_id = sub_res[0] if isinstance(sub_res, (list, tuple)) else sub_res
 
         t0 = time.time()
         while time.time() - t0 < self.MAX_WAIT:
             time.sleep(self.POLL_SECONDS)
             try:
-                stat = client.predict(task_id, api_name="/status_refresh")
+                stat = self._predict(client, task_id, api_name="/status_refresh", timeout=60)
+            except TimeoutError:
+                continue                 # slow poll: try again next interval
             except Exception:
                 # Older/newer Space builds poll with no argument on the same
                 # session — fall back to that form instead of failing the job.
-                stat = client.predict(api_name="/status_refresh")
+                stat = self._predict(client, api_name="/status_refresh", timeout=60)
             v_path = self._extract_video(stat)
             if v_path:
                 shutil.copyfile(v_path, out_path)
@@ -1398,45 +1431,31 @@ class AudioEngine:
             "Energetic": [(293.66, 369.99, 440.0), (329.63, 415.30, 493.88)],   # D major, E major
         }
         chords = chords_by_mood.get(mood, chords_by_mood["Ambient"])
-
-        sample_rate = 44100
-        total_samples = int(duration * sample_rate)
-        wav_temp = self.temp_dir / f"synth_{uuid.uuid4().hex[:8]}.wav"
-
-        chord_duration = 3.0
-        with wave.open(str(wav_temp), "w") as wav_file:
-            wav_file.setnchannels(2)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(sample_rate)
-
-            frames = bytearray()
-            for i in range(total_samples):
-                t = i / sample_rate
-                chord_idx = int(t / chord_duration) % len(chords)
-                f1, f2, f3 = chords[chord_idx]
-
-                # Harmonic synthesis with subtle LFO
-                lfo = 0.85 + 0.15 * math.sin(2 * math.pi * 0.3 * t)
-                val = (
-                    0.40 * math.sin(2 * math.pi * f1 * t) +
-                    0.30 * math.sin(2 * math.pi * f2 * t) +
-                    0.20 * math.sin(2 * math.pi * f3 * t) +
-                    0.10 * math.sin(2 * math.pi * (f1 * 2) * t)
-                ) * lfo
-
-                # Envelope fade in and fade out
-                fade_in = min(t / 1.5, 1.0)
-                fade_out = min((duration - t) / 2.0, 1.0)
-                sample_val = int(val * fade_in * fade_out * 12000)
-                sample_val = max(-32767, min(32767, sample_val))
-                packed = struct.pack("<hh", sample_val, sample_val)
-                frames.extend(packed)
-
-            wav_file.writeframes(frames)
-
-        run_ffmpeg(["-i", str(wav_temp), "-c:a", "libmp3lame", "-b:a", "192k", str(out_path)])
-        wav_temp.unlink(missing_ok=True)
+        duration = max(float(duration), 0.5)
+        # Rendered by ffmpeg's aevalsrc (C, per-sample) instead of a Python
+        # loop: same chords/LFO/envelope, ~100x faster (60 s took 12.6 s).
+        run_ffmpeg([
+            "-f", "lavfi", "-i", self.synth_expression(chords, duration),
+            "-af", f"afade=t=in:d=1.5,afade=t=out:st={max(0.0, duration - 2.0):.3f}:d=2",
+            "-ac", "2", "-c:a", "libmp3lame", "-b:a", "192k", str(out_path),
+        ])
         return out_path
+
+    @staticmethod
+    def synth_expression(chords: List[Tuple[float, float, float]], duration: float,
+                         chord_seconds: float = 3.0) -> str:
+        """aevalsrc source: chord pads cycling every `chord_seconds`, four
+        harmonics, 0.3 Hz amplitude LFO, peak about 0.37 full scale."""
+        def pad(f1: float, f2: float, f3: float) -> str:
+            return (f"0.40*sin(2*PI*{f1}*t)+0.30*sin(2*PI*{f2}*t)"
+                    f"+0.20*sin(2*PI*{f3}*t)+0.10*sin(2*PI*{f1 * 2}*t)")
+
+        cycle = chord_seconds * len(chords)
+        expr = pad(*chords[-1])
+        for i in range(len(chords) - 2, -1, -1):
+            expr = f"if(lt(mod(t\\,{cycle})\\,{chord_seconds * (i + 1)})\\,{pad(*chords[i])}\\,{expr})"
+        expr = f"0.366*(0.85+0.15*sin(2*PI*0.3*t))*({expr})"
+        return f"aevalsrc=exprs={expr}:s=44100:d={duration:.3f}"
 
     def mix_and_duck_audio(
         self,
@@ -1484,9 +1503,15 @@ class AudioEngine:
         # Both Voiceover + Music -> Apply ffmpeg sidechain ducking filter
         filter_complex = (
             f"[1:a]aloop=loop=-1:size=2e+09,volume={music_volume}[bg];"
-            f"[0:a]asplit=2[vo1][vo2];"
+            # apad: sidechaincompress ends with its sidechain, so without
+            # padding the music (and, via the -shortest mux, the VIDEO) was
+            # cut off the moment narration stopped. -t bounds the result.
+            f"[0:a]apad,asplit=2[vo1][vo2];"
             f"[bg][vo1]sidechaincompress=threshold=0.08:ratio=6:attack=30:release=450[ducked];"
-            f"[ducked][vo2]amix=inputs=2:duration=first:dropout_transition=2,"
+            # normalize=0: amix otherwise divides every input by 2, halving
+            # the narration; the limiter catches the (rare) summed peaks.
+            f"[ducked][vo2]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+            f"alimiter=limit=0.95,"
             f"afade=t=out:st={max(0.0, video_duration - 1.2)}:d=1.2[outa]"
         )
         run_ffmpeg([
@@ -1678,7 +1703,11 @@ class VideoEngine:
             zp = f"zoompan=z='1.15':d={total_frames}:x='if(lte(on,1),0,min(iw-iw/zoom,x+1.5))':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps}"
 
         vf = f"scale={width*2}:{height*2}:force_original_aspect_ratio=increase,crop={width*2}:{height*2},{zp},format=yuv420p"
-        run_ffmpeg(["-loop", "1", "-i", str(image_path), "-vf", vf, "-t", str(duration), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)])
+        # One still frame in, `d` animated frames out. (With `-loop 1` the
+        # image was re-fed at 25 fps and zoompan restarted per input frame;
+        # only `-t` hid it, at the cost of decoding/scaling every extra frame.)
+        run_ffmpeg(["-i", str(image_path), "-vf", vf, "-frames:v", str(max(total_frames, 1)),
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)])
         return out
 
     @staticmethod
