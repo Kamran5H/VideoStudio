@@ -4,8 +4,8 @@ Run explicitly with ``python test_verify.py``. Automated test discovery only
 runs the offline suite in ``tests/``.
 """
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 
 def main() -> None:

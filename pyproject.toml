@@ -1,0 +1,34 @@
+[project]
+name = "videostudio"
+version = "3.1.0"
+description = "Local Gradio studio for AI text/image-to-video and narrated storyboard videos"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+# Wan2.1-main/ is an unmodified upstream reference copy (the Colab worker
+# clones upstream itself); it is not imported by the app, so it is not linted.
+extend-exclude = ["Wan2.1-main"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+ignore = [
+    "E501",   # long UI strings/HTML/CSS lines are intentional; formatter not enforced
+    "UP006",  # keep typing.List/Dict for readability in this codebase
+    "UP035",
+    "UP045",  # Optional[X] kept for consistency with existing signatures
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]
+# Colab cells: imports follow the nvidia-smi check on purpose, and the worker
+# UI packs widget pairs on one line for readability.
+"*.ipynb" = ["E402", "E702"]
+
+[tool.pyright]
+include = ["app.py", "video_studio.py", "tests"]
+exclude = ["Wan2.1-main"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"

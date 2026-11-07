@@ -16,15 +16,24 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import List, Optional
 
 import gradio as gr
 
 from video_studio import (
-    ASPECT_SIZES, DEFAULT_OUTPUT_DIR, LANG_CODES, MUSIC_MOODS, QUALITY_TIERS,
-    STYLE_PRESETS, SUBTITLE_STYLES, TTS_VOICES, AudioEngine, FreeLLMPromptEnhancer,
-    HardwareProbe, JobSettings, JobStatus, PromptEngine, Stage, StudioConfig, SubtitleEngine,
-    VideoEngine, VideoStudio, log, log_queue,
+    ASPECT_SIZES,
+    DEFAULT_OUTPUT_DIR,
+    LANG_CODES,
+    MUSIC_MOODS,
+    QUALITY_TIERS,
+    STYLE_PRESETS,
+    SUBTITLE_STYLES,
+    TTS_VOICES,
+    FreeLLMPromptEnhancer,
+    JobSettings,
+    JobStatus,
+    Stage,
+    VideoStudio,
 )
 
 STUDIO = VideoStudio()
@@ -74,7 +83,7 @@ CSS = """
   --txt-main: #F8FAFC;
   --txt-muted: #94A3B8;
   --txt-dim: #64748B;
-  
+
   --body-background-fill: #05070E !important;
   --background-fill-primary: #0A0E1A !important;
   --background-fill-secondary: #10162A !important;
@@ -751,14 +760,14 @@ def load_ai_template(selected_label: str):
     if not key:
         return [gr.skip()] * 10
     preset = DEMO_AI_PRESETS.get(key)
-    return list(preset)
+    return list(preset) if preset else [gr.skip()] * 10
 
 def load_story_template(selected_label: str):
     key = STORY_TEMPLATE_MAP.get(selected_label)
     if not key:
         return [gr.skip()] * 7
     preset = DEMO_STORY_PRESETS.get(key)
-    return list(preset)
+    return list(preset) if preset else [gr.skip()] * 7
 
 # ---------------------------------------------------------------------------
 # Studio Callback Functions
@@ -1278,7 +1287,7 @@ def build_app() -> gr.Blocks:
         last_story_video_path = gr.State("")
 
         draft_payload = gr.Textbox(value="{}", visible=False)
-        with gr.Tabs(selected="ai", elem_id="studio-tabs") as studio_tabs:
+        with gr.Tabs(selected="ai", elem_id="studio-tabs"):
             # =================================================================
             # TAB 1: 🌟 4K AI Video
             # =================================================================
@@ -1355,7 +1364,7 @@ def build_app() -> gr.Blocks:
                         ai_live_card = gr.HTML("<div class='q-card'><b>Studio Ready</b>. Select a preset or type a prompt, then hit <b>Generate 4K Video</b>.</div>")
                         with gr.Group(elem_classes=["viewport-box"]):
                             ai_video_player = gr.Video(label="4K Rendered Output", interactive=False)
-                        
+
                         # Compact Export Toolbar
                         with gr.Row():
                             ai_open_folder_btn = gr.Button("📂 Open Videos Folder", variant="secondary", scale=3)
@@ -1448,7 +1457,7 @@ def build_app() -> gr.Blocks:
                         story_live_card = gr.HTML("<div class='q-card'><b>Storyboard Ready</b>. Direct a script or pick a template to build.</div>")
                         with gr.Group(elem_classes=["viewport-box"]):
                             story_video_player = gr.Video(label="Rendered Storyboard Movie", interactive=False)
-                        
+
                         with gr.Row():
                             story_open_folder_btn = gr.Button("📂 Open Videos Folder", variant="secondary")
 
@@ -1543,7 +1552,7 @@ def build_app() -> gr.Blocks:
         if len(draft_components) != len(DRAFT_DEFAULTS):
             raise RuntimeError("Draft component registration does not match its saved schema.")
 
-        for key, component in zip(DRAFT_DEFAULTS, draft_components):
+        for key, component in zip(DRAFT_DEFAULTS, draft_components, strict=True):
             save_event = component.input if isinstance(component, gr.Textbox) else component.change
             save_event(
                 fn=None,

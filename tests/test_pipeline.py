@@ -202,6 +202,23 @@ class NetworkHardeningTests(unittest.TestCase):
         self.assertEqual(kw["params"]["key"], "PIXKEY")
 
 
+class HFClientTests(unittest.TestCase):
+    def test_token_is_passed_with_the_keyword_the_client_accepts(self):
+        try:
+            import gradio_client
+        except ImportError:
+            self.skipTest("gradio_client not installed")
+        seen = {}
+
+        class FakeClient:
+            def __init__(self, src, token=None, verbose=True):
+                seen.update(src=src, token=token)
+
+        with patch.object(gradio_client, "Client", FakeClient):
+            vs.hf_space_client("org/space", "  hf_abc ")
+        self.assertEqual(seen, {"src": "org/space", "token": "hf_abc"})
+
+
 class BackendLoopTests(unittest.TestCase):
     def test_failed_backend_does_not_corrupt_next_chunk_width(self):
         """Regression: `w = quota_wait_seconds(...)` overwrote the clip width."""

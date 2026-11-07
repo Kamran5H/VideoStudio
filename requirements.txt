@@ -1,16 +1,18 @@
-# VideoStudio Pro — Unified AI Video & Storyboard Studio
-# Python 3.10 - 3.14 on Windows / macOS / Linux
+# VideoStudio — runtime dependencies (Python 3.10+; Windows / macOS / Linux)
+# Upper bounds stop a major release from silently breaking the app.
 
-gradio>=5.0.0
-gradio_client>=1.0.0
-edge-tts>=6.1.0
-deep-translator>=1.11.0
-imageio-ffmpeg>=0.5.0
-pillow>=10.0.0
-requests>=2.31.0
-pydantic>=2.0.0
-python-dotenv>=1.0.0
-gTTS>=2.4.0
+# app.py passes css=/head= to launch(), which needs Gradio 6.
+gradio>=6.0,<7
+gradio_client>=2.0,<3
+# edge-tts 7 changed boundary events; video_studio requests WordBoundary explicitly.
+edge-tts>=7.0,<8
+gTTS>=2.4,<3
+deep-translator>=1.11,<2
+# Bundled ffmpeg binary, used when ffmpeg is not on PATH.
+imageio-ffmpeg>=0.5,<1
+pillow>=10.0,<13
+requests>=2.31,<3
+python-dotenv>=1.0,<2
 
-# Optional GenAI acceleration:
-google-genai>=0.1.0
+# Optional: Gemini prompt enhancement and storyboard scripts (GEMINI_API_KEY).
+google-genai>=1.0,<4

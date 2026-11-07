@@ -1,7 +1,7 @@
 import json
 import os
-import threading
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -188,7 +188,7 @@ class VideoStudioCoreTests(unittest.TestCase):
                 }
             )
         )
-        restored = dict(zip(DRAFT_DEFAULTS, values))
+        restored = dict(zip(DRAFT_DEFAULTS, values, strict=True))
         self.assertEqual(restored["ai_prompt"], "A saved creative draft")
         self.assertEqual(restored["ai_quality"], DRAFT_DEFAULTS["ai_quality"])
         self.assertEqual(restored["ai_duration"], 60)
@@ -199,7 +199,7 @@ class VideoStudioCoreTests(unittest.TestCase):
 
     def test_clear_draft_restores_form_defaults(self):
         cleared = clear_browser_draft()
-        self.assertEqual(dict(zip(DRAFT_DEFAULTS, cleared)), DRAFT_DEFAULTS)
+        self.assertEqual(dict(zip(DRAFT_DEFAULTS, cleared, strict=True)), DRAFT_DEFAULTS)
         self.assertIn("sessionStorage", restore_selected_tab_js())
 
     def test_draft_persistence_is_tab_session_scoped(self):

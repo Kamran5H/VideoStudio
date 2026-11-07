@@ -41,7 +41,7 @@ import zlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Ensure UTF-8 stream handling for Windows consoles
 for _stream_name in ("stdout", "stderr"):
@@ -282,7 +282,7 @@ class HardwareProbe:
 
     def _probe(self) -> None:
         try:
-            import torch
+            import torch  # pyright: ignore[reportMissingImports]  # optional, local-GPU only
             self.has_cuda = torch.cuda.is_available()
             if self.has_cuda:
                 props = torch.cuda.get_device_properties(0)
@@ -371,7 +371,7 @@ class StudioConfig:
         path.write_text(json.dumps(dataclasses.asdict(self), indent=2), encoding="utf-8")
 
     @classmethod
-    def load(cls, path: Path = CONFIG_PATH) -> "StudioConfig":
+    def load(cls, path: Path = CONFIG_PATH) -> StudioConfig:
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -552,7 +552,7 @@ class FreeLLMPromptEnhancer:
                     f"Specify camera ({style_data['camera']}), lighting ({style_data['light']}), and grade ({style_data['grade']}). "
                     "Output ONLY the prompt text, no commentary, under 75 words."
                 )
-                
+
                 for model_name in gemini_models():
                     try:
                         resp = client.models.generate_content(
@@ -569,8 +569,9 @@ class FreeLLMPromptEnhancer:
 
         # 2. Try Pollinations Free LLM Endpoint (No key / Zero billing)
         try:
-            import requests
             import urllib.parse
+
+            import requests
             q_enc = urllib.parse.quote(f"Expand into 50-word cinematic {style} video prompt: {clean_p}")
             resp = requests.get(f"https://text.pollinations.ai/{q_enc}", timeout=6)
             if resp.status_code == 200 and len(resp.text.strip()) > 15:
@@ -739,6 +740,25 @@ def quota_wait_seconds(error_text: str) -> Optional[int]:
         need = int(m2.group(1)) - int(m2.group(2))
     return max(hint, min(need, 3600), 60) + 20
 
+def hf_space_client(space: str, hf_token: str = "") -> Any:
+    """gradio_client.Client for a HF Space, authenticated when a token is set.
+
+    gradio_client 2.x renamed ``hf_token=`` to ``token=``. The old code passed
+    ``hf_token=`` inside a bare ``except`` that retried anonymously, so the
+    user's token was silently never sent (lower ZeroGPU quota). Pick the
+    keyword the installed client actually accepts.
+    """
+    import inspect
+
+    from gradio_client import Client
+    token = (hf_token or "").strip() or None
+    if not token:
+        return Client(space, verbose=False)
+    if "token" in inspect.signature(Client.__init__).parameters:
+        return Client(space, verbose=False, token=token)
+    return Client(space, verbose=False, hf_token=token)  # pyright: ignore[reportCallIssue]  # gradio_client < 2
+
+
 class GenerationBackend:
     name = "abstract"
     description = ""
@@ -850,13 +870,8 @@ class LTXSpaceBackend(GenerationBackend):
         self._client: Any = None
 
     def _get_client(self) -> Any:
-        from gradio_client import Client
         if self._client is None:
-            token = self.config.hf_token.strip() or None
-            try:
-                self._client = Client(self.SPACE, hf_token=token, verbose=False)
-            except Exception:
-                self._client = Client(self.SPACE, verbose=False)
+            self._client = hf_space_client(self.SPACE, self.config.hf_token)
         return self._client
 
     @staticmethod
@@ -923,13 +938,8 @@ class CogVideoXBackend(GenerationBackend):
         self._client: Any = None
 
     def _get_client(self) -> Any:
-        from gradio_client import Client
         if self._client is None:
-            token = self.config.hf_token.strip() or None
-            try:
-                self._client = Client(self.SPACE, hf_token=token, verbose=False)
-            except Exception:
-                self._client = Client(self.SPACE, verbose=False)
+            self._client = hf_space_client(self.SPACE, self.config.hf_token)
         return self._client
 
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
@@ -967,13 +977,8 @@ class WanOfficialBackend(GenerationBackend):
         self.config = config
 
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
-        from gradio_client import Client
         progress("Wan2.1-14B Official: connecting to space...")
-        token = self.config.hf_token.strip() or None
-        try:
-            client = Client(self.SPACE, hf_token=token, verbose=False)
-        except Exception:
-            client = Client(self.SPACE, verbose=False)
+        client = hf_space_client(self.SPACE, self.config.hf_token)
 
         size_choice = "1280*720" if req.width >= req.height else "720*1280"
         progress(f"Wan2.1-14B Official: submitting {size_choice} job...")
@@ -1337,7 +1342,7 @@ class AudioEngine:
             with open(out, "wb") as f:
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
-                        f.write(chunk["data"])
+                        f.write(chunk.get("data", b""))
                     elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
                         target = words if chunk["type"] == "WordBoundary" else sentences
                         target.append({
@@ -1830,7 +1835,7 @@ class Stage(str, Enum):
     CANCELLED = "Cancelled"
 
     @classmethod
-    def from_str(cls, val: Any) -> "Stage":
+    def from_str(cls, val: Any) -> Stage:
         val_clean = str(val).strip().lower()
         for member in cls:
             if member.value.lower() == val_clean or member.name.lower() == val_clean:
@@ -1882,7 +1887,7 @@ class JobStatus:
 class JobQueue:
     """Thread-safe, persistent batch job queue with auto-resume and crash recovery."""
 
-    def __init__(self, studio: "VideoStudio"):
+    def __init__(self, studio: VideoStudio):
         self.studio = studio
         self.queue_file = DEFAULT_OUTPUT_DIR / "queue" / "jobs.json"
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2784,7 +2789,7 @@ class VideoStudioDesktopGUI:
     def __init__(self, studio: VideoStudio):
         self.studio = studio
         import tkinter as tk
-        from tkinter import ttk, messagebox, filedialog
+        from tkinter import ttk
 
         self.root = tk.Tk()
         self.root.title("VideoStudio Pro — AI Video & Storyboard Studio [Kamran Ashraf / Kami]")
