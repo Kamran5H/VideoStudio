@@ -6,7 +6,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import app
+# Importing app builds a real VideoStudio: without this, the test run would
+# write to the user's outputs/, take the worker lock and auto-resume real jobs.
+os.environ.setdefault("VIDEOSTUDIO_OUTPUT_DIR", tempfile.mkdtemp(prefix="vs_test_out_"))
+
+import app  # noqa: E402
 from app import (
     DRAFT_DEFAULTS,
     clear_browser_draft,

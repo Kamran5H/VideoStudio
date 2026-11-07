@@ -37,6 +37,7 @@ import threading
 import time
 import uuid
 import wave
+import zlib
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -492,7 +493,9 @@ class PromptEngine:
         if not prompt:
             return prompt
         style = STYLE_PRESETS.get(preset, STYLE_PRESETS["Cinematic"])
-        rng = random.Random(seed if seed is not None else hash(prompt) & 0xFFFF)
+        # crc32, not hash(): str hashes are randomized per process, so the
+        # "deterministic" offline enhancer gave different text on every launch.
+        rng = random.Random(seed if seed is not None else zlib.crc32(prompt.encode("utf-8")))
         motion = rng.choice(_MOTION_HINTS)
         parts = [
             f"{style['prefix']} {prompt}.",
@@ -636,6 +639,48 @@ ASPECT_SIZES_720 = {
 }
 
 QUALITY_TIERS = ["480p", "720p", "1080p", "4K"]
+
+
+def output_size(aspect_ratio: str, short_edge: int = 1080) -> Tuple[int, int]:
+    """Even (width, height) for an aspect ratio with the given short edge.
+    Unknown ratios fall back to 16:9."""
+    bw, bh = ASPECT_SIZES.get(aspect_ratio, ASPECT_SIZES["16:9"])
+    if bw >= bh:
+        w, h = short_edge * bw / bh, short_edge
+    else:
+        w, h = short_edge, short_edge * bh / bw
+    return int(round(w / 2)) * 2, int(round(h / 2)) * 2
+
+
+SCRIPT_CROSSFADE_SECONDS = 0.4
+MIN_SCENE_SECONDS = 3.5
+
+
+def scene_video_seconds(vo_duration: float) -> float:
+    """On-screen length of a storyboard scene: narration + 0.5s breathing room."""
+    return max(vo_duration + 0.5, MIN_SCENE_SECONDS)
+
+
+def scene_slot_seconds(vo_duration: float, index: int, count: int,
+                       crossfade: float = SCRIPT_CROSSFADE_SECONDS) -> float:
+    """Timeline time a scene owns in the stitched video. Every scene except
+    the last loses `crossfade` seconds to the overlap with the next one, so
+    the narration track must advance by exactly this much per scene."""
+    dur = scene_video_seconds(vo_duration)
+    return dur if index >= count - 1 else dur - crossfade
+
+
+def vo_timeline_filter(slots: List[float]) -> str:
+    """ffmpeg filter_complex that resamples every narration clip to one format
+    (edge-tts, gTTS and silence differ) and pads/trims each to its scene slot
+    before concatenating, producing a track aligned with the stitched video."""
+    parts = [
+        f"[{i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        f"apad=whole_dur={s:.3f},atrim=0:{s:.3f},asetpts=N/SR/TB[a{i}]"
+        for i, s in enumerate(slots)
+    ]
+    joined = "".join(f"[a{i}]" for i in range(len(slots)))
+    return ";".join(parts) + f";{joined}concat=n={len(slots)}:v=0:a=1[outa]"
 
 @dataclass
 class GenerationRequest:
@@ -1377,8 +1422,9 @@ class AudioEngine:
                 music_file = self.generate_synth_music(music_mood, video_duration + 2.0, synth_path)
 
         if has_vo and not has_music:
-            # Voiceover only, pad to video duration if needed
-            run_ffmpeg(["-i", str(voiceover_path), "-af", f"apad=whole_dur={video_duration}", "-c:a", "aac", str(out_path)])
+            # Voiceover only: pad short narration AND cut long narration to the video
+            run_ffmpeg(["-i", str(voiceover_path), "-af", f"apad=whole_dur={video_duration}",
+                        "-t", f"{video_duration:.3f}", "-c:a", "aac", str(out_path)])
             return out_path
 
         if has_music and not has_vo:
@@ -2293,7 +2339,7 @@ class VideoStudio:
             if not success:
                 # Intelligent visual asset & Ken Burns 3D motion synthesis fallback
                 log.info("Engaging cinematic visual synthesis fallback for chunk %d...", idx)
-                chunk_dur = min(float(CHUNK_SECONDS), 5.0)
+                chunk_dur = chunk_secs     # match the AI chunk length so total duration is right
                 asset_path, media_type = self.media_fetcher.fetch_scene_visual(
                     req.prompt, req.width, req.height, prefer_video=True, style=sett.style_preset
                 )
@@ -2313,8 +2359,12 @@ class VideoStudio:
 
             clips.append(clip_out)
 
-            # Extract last frame for continuous image-to-video chaining
-            run_ffmpeg(["-sseof", "-0.1", "-i", str(clip_out), "-vsync", "0", "-q:v", "2", "-update", "1", str(last_frame)])
+            # Extract last frame for continuous image-to-video chaining. Optional:
+            # a failure here must not fail a job whose clip rendered fine.
+            try:
+                run_ffmpeg(["-sseof", "-0.5", "-i", str(clip_out), "-q:v", "2", "-update", "1", str(last_frame)])
+            except FFmpegError as exc:
+                log.warning("Last-frame extraction skipped for chunk %d: %s", idx, exc)
             if last_frame.exists():
                 last_frame_path = str(last_frame)
 
@@ -2435,13 +2485,19 @@ class VideoStudio:
         if not scenes:
             scenes = [("Visual: " + sett.prompt, "VO: " + sett.prompt)]
 
-        w, h = (1920, 1080) if sett.aspect_ratio == "16:9" else (1080, 1920) if sett.aspect_ratio == "9:16" else (1080, 1080)
+        w, h = output_size(sett.aspect_ratio, 1080)
+        xfade = SCRIPT_CROSSFADE_SECONDS
 
         # 2. Process Scenes (with per-scene checkpoint reuse)
         scene_clips: List[Path] = []
         all_events: List[dict] = []
         vo_files: List[Path] = []
+        # Audio slot per scene = the time that scene is on screen after the
+        # crossfade overlap. Each VO is padded/trimmed to its slot so narration
+        # and captions stay in sync with the visuals across the whole video.
+        slots: List[float] = []
         current_offset = 0.0
+        n_scenes = len(scenes)
 
         for s_idx, (vis_prompt, vo_prompt) in enumerate(scenes):
             if self.queue.is_cancelled(sett.job_id):
@@ -2468,7 +2524,9 @@ class VideoStudio:
                         }
                         for ev in events
                     )
-                    current_offset += vo_dur
+                    slot = scene_slot_seconds(vo_dur, s_idx, n_scenes, xfade)
+                    slots.append(slot)
+                    current_offset += slot
                     continue
                 log.warning(
                     "Scene checkpoint metadata missing or invalid for %s; regenerating scene",
@@ -2483,7 +2541,7 @@ class VideoStudio:
             if vo_path_gen.exists():
                 shutil.copyfile(vo_path_gen, vo_path)
             vo_dur = ffprobe_duration(vo_path)
-            scene_dur = max(vo_dur + 0.5, 3.5)
+            scene_dur = scene_video_seconds(vo_dur)
 
             # Adjust event offsets for full video timeline
             for ev in events:
@@ -2512,7 +2570,9 @@ class VideoStudio:
             actual_scene_duration = ffprobe_duration(scene_video)
             if actual_scene_duration <= 0.5:
                 raise RuntimeError(f"Scene render produced an invalid video: {scene_video}")
-            current_offset += vo_dur
+            slot = scene_slot_seconds(vo_dur, s_idx, n_scenes, xfade)
+            slots.append(slot)
+            current_offset += slot
             self._write_scene_checkpoint(
                 metadata_path,
                 events,
@@ -2527,23 +2587,20 @@ class VideoStudio:
         progress_cb(sett.job_id, Stage.STITCHING, 0.70, "Stitching scenes...")
         stitched = job_dir / "script_stitched.mp4"
         if not (stitched.exists() and ffprobe_duration(stitched) > 0.5):
-            self.video_engine.crossfade_concat(scene_clips, stitched, crossfade=0.4)
+            self.video_engine.crossfade_concat(scene_clips, stitched, crossfade=xfade, size=(w, h), fps=sett.fps)
 
         # 4. Mix Full Audio Timeline
         progress_cb(sett.job_id, Stage.AUDIO, 0.85, "Mixing multilingual audio and music...")
         tot_dur = ffprobe_duration(stitched)
         # Concatenate per-scene VO files into one track (guard against none).
-        valid_vo = [vf for vf in vo_files if vf and Path(vf).exists()]
         full_vo: Optional[Path] = None
-        if len(valid_vo) == 1:
-            full_vo = valid_vo[0]
-        elif len(valid_vo) > 1:
+        if vo_files and all(Path(vf).exists() for vf in vo_files):
             full_vo = job_dir / "full_vo.mp3"
-            vo_inputs = []
-            for vf in valid_vo:
+            vo_inputs: List[str] = []
+            for vf in vo_files:
                 vo_inputs.extend(["-i", str(vf)])
-            filter_a = "".join(f"[{i}:a]" for i in range(len(valid_vo))) + f"concat=n={len(valid_vo)}:v=0:a=1[outa]"
-            run_ffmpeg([*vo_inputs, "-filter_complex", filter_a, "-map", "[outa]", "-c:a", "libmp3lame", str(full_vo)])
+            run_ffmpeg([*vo_inputs, "-filter_complex", vo_timeline_filter(slots), "-map", "[outa]",
+                        "-c:a", "libmp3lame", str(full_vo)])
 
         mixed_audio = job_dir / "final_mixed_audio.aac"
         self.audio_engine.mix_and_duck_audio(full_vo, sett.music_mood, tot_dur, mixed_audio)
@@ -2561,8 +2618,12 @@ class VideoStudio:
         if sett.subtitles_enabled:
             progress_cb(sett.job_id, Stage.SUBTITLES, 0.92, "Burning styled subtitles...")
             burned = job_dir / "burned.mp4"
-            self.subtitle_engine.burn_subtitles(current_vid, srt_file, burned, sett.subtitle_style)
-            current_vid = burned
+            try:
+                self.subtitle_engine.burn_subtitles(current_vid, srt_file, burned, sett.subtitle_style)
+                current_vid = burned
+            except FFmpegError as e:
+                # Same policy as AI mode: keep the narrated video, ship the .srt.
+                log.warning("Subtitle burning skipped: %s", e)
 
         if sett.watermark_logo:
             logo = ASSETS_DIR / "kaami_makes_logo.png"
@@ -2649,7 +2710,11 @@ class VideoStudio:
             vis.clear()
             vo.clear()
 
-        label = re.compile(r"^\s*(?:[-*\d.)\s]*)?(?:\*\*)?(visual|vo|voiceover|narration)(?:\*\*)?\s*:\s*(.*)$", re.IGNORECASE)
+        # Accepts "Visual:", "**Visual:**", "**Visual**:", "1. VO:", "- Narration:" ...
+        label = re.compile(
+            r"^\s*(?:[-*\d.)\s]*)?(?:\*\*)?(visual|vo|voiceover|narration)(?:\*\*)?\s*:\s*(?:\*\*)?\s*(.*)$",
+            re.IGNORECASE,
+        )
         for raw in script.strip().splitlines():
             line = raw.strip()
             if not line:
