@@ -191,19 +191,51 @@ def ffmpeg_exe() -> str:
 def ffprobe_exe() -> Optional[str]:
     return shutil.which("ffprobe")
 
-def run_ffmpeg(args: list[str], timeout: int = 1800) -> None:
-    """Run ffmpeg with arguments; raise on failure."""
+class FFmpegError(RuntimeError):
+    """ffmpeg is missing, timed out, or exited non-zero."""
+
+
+def run_ffmpeg(args: list[str], timeout: int = 1800, cwd: Optional[Path] = None) -> None:
+    """Run ffmpeg with arguments; raise FFmpegError on any failure.
+
+    Missing binaries and timeouts are converted to FFmpegError too, so callers
+    (and the job queue's retry logic) see one exception type with a readable
+    message instead of a bare FileNotFoundError / TimeoutExpired.
+    """
     cmd = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", *args]
-    log.debug("ffmpeg: %s", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    log.debug("ffmpeg: %s", subprocess.list2cmdline(cmd))
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, cwd=str(cwd) if cwd else None,
+        )
+    except FileNotFoundError as exc:
+        raise FFmpegError(
+            "ffmpeg was not found. Install it (or `pip install imageio-ffmpeg`) and restart."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise FFmpegError(f"ffmpeg timed out after {timeout}s") from exc
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {proc.stderr[-2000:]}")
+        raise FFmpegError(f"ffmpeg failed ({proc.returncode}): {(proc.stderr or '')[-2000:]}")
+
+
+def _ffmpeg_info(path: Path) -> str:
+    """stderr of ``ffmpeg -i path`` (stream/duration info), or '' on failure."""
+    try:
+        proc = subprocess.run(
+            [ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stderr or ""
+
 
 def ffprobe_duration(path: Path) -> float:
     """Video/audio duration in seconds via ffprobe or ffmpeg fallback.
 
     Both probes are bounded by a timeout so a corrupt or streaming input can
-    never hang the worker thread; on timeout we fall through to 0.0.
+    never hang the worker thread; any failure returns 0.0.
     """
     ffprobe = ffprobe_exe()
     if ffprobe:
@@ -212,19 +244,25 @@ def ffprobe_duration(path: Path) -> float:
                 [ffprobe, "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
                 capture_output=True, text=True, timeout=60,
             )
-            return float(proc.stdout.strip())
-        except (ValueError, subprocess.TimeoutExpired):
+            value = float(proc.stdout.strip())
+            if math.isfinite(value) and value >= 0:
+                return value
+        except (ValueError, OSError, subprocess.TimeoutExpired):
             pass
-    # Fallback: parse Duration from ffmpeg stderr
-    try:
-        proc = subprocess.run([ffmpeg_exe(), "-i", str(path)], capture_output=True, text=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        return 0.0
-    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", proc.stderr)
+    # Fallback: parse Duration from ffmpeg stderr (imageio-ffmpeg ships no ffprobe)
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", _ffmpeg_info(path))
     if not m:
         return 0.0
     h, mnt, s = m.groups()
     return int(h) * 3600 + int(mnt) * 60 + float(s)
+
+
+def probe_video_size(path: Path) -> Optional[Tuple[int, int]]:
+    """(width, height) of the first video stream, or None if unknown."""
+    m = re.search(r"Video:.*?,\s*(\d{2,5})x(\d{2,5})\b", _ffmpeg_info(path))
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
 
 # ----------------------------------------------------------------------------
 # 1. Environment & Hardware Layer
@@ -549,7 +587,7 @@ class FreeLLMPromptEnhancer:
                     f"Write an engaging {scene_count}-scene video script about '{prompt}' in {language}. "
                     "For each scene, structure it EXACTLY as:\n\n"
                     "Visual: [3-5 visual keywords for stock footage / Nano Banana generation, e.g., golden sunrise mountains drone aerial]\n"
-                    "VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
+                    f"VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
                     "Output ONLY the Visual: and VO: lines without headers or numbering."
                 )
                 for model_name in ("gemini-2.5-flash", "gemini-1.5-flash"):
@@ -1205,39 +1243,61 @@ class AudioEngine:
         events: List[dict] = []
 
         async def _synthesize():
+            import inspect
+
             import edge_tts
-            communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-            submaker = edge_tts.SubMaker()
+            kwargs: Dict[str, Any] = {"rate": rate, "pitch": pitch}
+            # edge-tts >= 7 only emits SentenceBoundary events unless asked;
+            # without word boundaries the karaoke subtitles come out empty.
+            if "boundary" in inspect.signature(edge_tts.Communicate).parameters:
+                kwargs["boundary"] = "WordBoundary"
+            communicate = edge_tts.Communicate(text, voice, **kwargs)
+            words: List[dict] = []
+            sentences: List[dict] = []
             with open(out, "wb") as f:
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
                         f.write(chunk["data"])
-                    elif chunk["type"] == "WordBoundary":
-                        events.append({
+                    elif chunk["type"] in ("WordBoundary", "SentenceBoundary"):
+                        target = words if chunk["type"] == "WordBoundary" else sentences
+                        target.append({
                             "text": chunk.get("text", ""),
                             "offset": chunk.get("offset", 0) / 10_000_000,
                             "duration": chunk.get("duration", 0) / 10_000_000,
                         })
+            events.extend(words or sentences)
+
+        if not text.strip():
+            events.clear()
+            self._silence(out, 1.0)
+            return out, events
 
         try:
             asyncio.run(_synthesize())
+            if not out.exists() or out.stat().st_size < 100:
+                raise RuntimeError("edge-tts returned no audio")
         except Exception as exc:
             log.warning("edge-tts synthesis failed (%s); using gTTS fallback", exc)
+            events.clear()          # partial boundaries would not match new audio
             self._gtts_fallback(text, language, out)
 
         return out, events
 
+    @staticmethod
+    def _silence(out_path: Path, seconds: float) -> None:
+        run_ffmpeg(["-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", f"{seconds:.2f}",
+                    "-c:a", "libmp3lame", str(out_path)])
+
     def _gtts_fallback(self, text: str, language: str, out_path: Path) -> None:
         try:
             from gtts import gTTS
-            lang_codes = {"English": "en", "Urdu": "ur", "Hindi": "hi", "Spanish": "es", "French": "fr", "Arabic": "ar"}
-            code = lang_codes.get(language, "en")
+            code = LANG_CODES.get(language, "en")
             tts = gTTS(text=text, lang=code)
             tts.save(str(out_path))
         except Exception as exc:
             log.error("gTTS fallback failed: %s", exc)
-            # Create a 2s silent mp3 as last resort
-            run_ffmpeg(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "2", "-c:a", "libmp3lame", str(out_path)])
+            # Last resort: short silence so the pipeline still produces a video
+            self._silence(out_path, 2.0)
 
     def generate_synth_music(self, mood: str, duration: float, out_path: Path) -> Path:
         """Generates rich harmonic synth ambient background music without external assets."""
@@ -1471,16 +1531,30 @@ class SubtitleEngine:
         out_path: Path,
         style_name: str = "Neon Glow",
     ) -> Path:
-        """Burns styled subtitles into video via ffmpeg."""
+        """Burns styled subtitles into video via ffmpeg.
+
+        The subtitles filter takes a filter-graph-escaped path, which breaks on
+        Windows drive letters and on apostrophes/commas in folder names. We run
+        ffmpeg *inside* the SRT's folder and reference a plain file name, so no
+        escaping is needed; the video paths are made absolute.
+        """
         style = SUBTITLE_STYLES.get(style_name, SUBTITLE_STYLES["Neon Glow"])
-        escaped_srt = str(srt_path).replace("\\", "/").replace(":", "\\:")
         force_style = (
             f"Fontsize={style['FontSize']},PrimaryColour={style['PrimaryColour']},"
             f"OutlineColour={style['OutlineColour']},BackColour={style['BackColour']},"
             f"Outline={style['Outline']},Shadow={style['Shadow']},MarginV=28,Alignment=2"
         )
-        vf = f"subtitles='{escaped_srt}':force_style='{force_style}'"
-        run_ffmpeg(["-i", str(video_path), "-vf", vf, "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+        srt_path = Path(srt_path).resolve()
+        safe_name = srt_path.name
+        if not re.fullmatch(r"[\w.\-]+", safe_name):
+            safe_name = "subs_burn.srt"
+            shutil.copyfile(srt_path, srt_path.parent / safe_name)
+        vf = f"subtitles={safe_name}:charenc=UTF-8:force_style='{force_style}'"
+        run_ffmpeg(
+            ["-i", str(Path(video_path).resolve()), "-vf", vf, "-map", "0:v:0", "-map", "0:a?",
+             "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(Path(out_path).resolve())],
+            cwd=srt_path.parent,
+        )
         return out_path
 
 # ----------------------------------------------------------------------------
@@ -1518,20 +1592,45 @@ class VideoEngine:
         return out
 
     @staticmethod
-    def crossfade_concat(video_clips: List[Path], out_path: Path, crossfade: float = CROSSFADE_SECONDS) -> Path:
-        """Smoothly concatenates video clips with crossfade transitions and normalized timebases."""
+    def normalize_filter(width: int, height: int, fps: int) -> str:
+        """Letterbox any clip into width x height at a fixed fps/timebase so
+        clips from different backends can be xfaded or concatenated."""
+        return (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+            f"fps={fps},settb=AVTB,format=yuv420p"
+        )
+
+    @staticmethod
+    def crossfade_concat(
+        video_clips: List[Path],
+        out_path: Path,
+        crossfade: float = CROSSFADE_SECONDS,
+        size: Optional[Tuple[int, int]] = None,
+        fps: int = 30,
+    ) -> Path:
+        """Smoothly concatenates video clips with crossfade transitions.
+
+        Every input is normalized to one frame size (``size`` or the first
+        clip's size), fps and timebase first: xfade and concat both reject
+        inputs whose dimensions differ, which happens whenever the backend
+        fallback chain switches models mid-job.
+        """
         if not video_clips:
             raise ValueError("No video clips provided for concatenation.")
         if len(video_clips) == 1:
             shutil.copyfile(video_clips[0], out_path)
             return out_path
 
+        tw, th = size or probe_video_size(video_clips[0]) or (1280, 720)
+        tw, th = tw - tw % 2, th - th % 2
+        norm = VideoEngine.normalize_filter(tw, th, fps)
+
         inputs = []
         filter_parts = []
         for i, v in enumerate(video_clips):
             inputs.extend(["-i", str(v)])
-            # Normalize each input stream with fixed 30 FPS and standard timebase
-            filter_parts.append(f"[{i}:v]fps=30,settb=AVTB,format=yuv420p[v{i}]")
+            filter_parts.append(f"[{i}:v]{norm}[v{i}]")
 
         cur_label = "v0"
         offset = 0.0
@@ -1550,7 +1649,7 @@ class VideoEngine:
         except Exception as e:
             log.warning("xfade transition failed (%s), falling back to standard concat...", e)
             # Safe robust concat fallback
-            concat_parts = [f"[{i}:v]fps=30,settb=AVTB,format=yuv420p[cv{i}]" for i in range(len(video_clips))]
+            concat_parts = [f"[{i}:v]{norm}[cv{i}]" for i in range(len(video_clips))]
             join_str = "".join(f"[cv{i}]" for i in range(len(video_clips))) + f"concat=n={len(video_clips)}:v=1:a=0[outv]"
             filter_fallback = ";".join(concat_parts) + ";" + join_str
             run_ffmpeg([*inputs, "-filter_complex", filter_fallback, "-map", "[outv]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
@@ -1580,21 +1679,31 @@ class VideoEngine:
         run_ffmpeg(["-i", str(video_path), "-vf", vf, "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
         return out_path
 
+    UPSCALE_SHORT_EDGE = {"720p": 720, "1080p": 1080, "4K": 2160}
+
+    @staticmethod
+    def upscale_filter(target_quality: str) -> Optional[str]:
+        """Aspect-preserving Lanczos scale: the SHORT edge becomes the tier
+        height, so 9:16 / 1:1 / 21:9 clips are no longer squashed into a
+        fixed 16:9 frame. Dimensions stay even for yuv420p/libx264."""
+        short = VideoEngine.UPSCALE_SHORT_EDGE.get(target_quality)
+        if not short:
+            return None
+        return (
+            f"scale='if(gte(iw,ih),-2,{short})':'if(gte(iw,ih),{short},-2)':flags=lanczos"
+        )
+
     @staticmethod
     def upscale_video(video_path: Path, target_quality: str, out_path: Path) -> Path:
-        """Upscales video to 720p / 1080p / 4K using Lanczos high-detail algorithm."""
-        res_map = {
-            "720p": "scale=1280:720:flags=lanczos",
-            "1080p": "scale=1920:1080:flags=lanczos",
-            "4K": "scale=3840:2160:flags=lanczos",
-        }
-        scale_filter = res_map.get(target_quality)
+        """Upscales video to 720p / 1080p / 4K using Lanczos, preserving aspect ratio."""
+        scale_filter = VideoEngine.upscale_filter(target_quality)
         if not scale_filter:
             shutil.copyfile(video_path, out_path)
             return out_path
 
         vf = f"{scale_filter},unsharp=5:5:0.8:5:5:0.0"
-        run_ffmpeg(["-i", str(video_path), "-vf", vf, "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+        run_ffmpeg(["-i", str(video_path), "-vf", vf, "-map", "0:v:0", "-map", "0:a?",
+                    "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
         return out_path
 
     @staticmethod
@@ -1608,7 +1717,11 @@ class VideoEngine:
         }
         overlay_pos = pos_map.get(position, pos_map["bottom_right"])
         filter_complex = f"[1:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.75[wm];[0:v][wm]overlay={overlay_pos}[outv]"
-        run_ffmpeg(["-i", str(video_path), "-i", str(watermark_path), "-filter_complex", filter_complex, "-map", "[outv]", "-c:a", "copy", "-c:v", "libx264", str(out_path)])
+        # Map the source audio explicitly: with only "-map [outv]" ffmpeg drops
+        # the narration/music track entirely.
+        run_ffmpeg(["-i", str(video_path), "-i", str(watermark_path), "-filter_complex", filter_complex,
+                    "-map", "[outv]", "-map", "0:a?", "-c:a", "copy", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", str(out_path)])
         return out_path
 
     @staticmethod
@@ -2157,9 +2270,11 @@ class VideoStudio:
                     log.warning("Backend %s quota-limited: %s", b_name, q)
                 except Exception as e:
                     msg = str(e)
-                    w = quota_wait_seconds(msg)
-                    if w:
-                        quota_hint = max(quota_hint, w)
+                    # NOTE: must not reuse `w` here — it holds the clip width
+                    # for the next chunk's GenerationRequest.
+                    wait_s = quota_wait_seconds(msg)
+                    if wait_s:
+                        quota_hint = max(quota_hint, wait_s)
                     elif is_transient_error(msg):
                         transient = True
                     log.warning("Backend %s failed: %s", b_name, e)
@@ -2515,15 +2630,48 @@ class VideoStudio:
         temp_path.replace(path)
 
     def _parse_script_scenes(self, script: str) -> List[Tuple[str, str]]:
-        scenes = []
-        blocks = re.split(r"\n\s*\n", script.strip())
-        for block in blocks:
-            vis_m = re.search(r"Visual:\s*(.*?)(?=\nVO:|\Z)", block, re.IGNORECASE | re.DOTALL)
-            vo_m = re.search(r"VO:\s*(.*)", block, re.IGNORECASE | re.DOTALL)
-            vis = vis_m.group(1).strip() if vis_m else ""
-            vo = vo_m.group(1).strip() if vo_m else ""
-            if vis or vo:
-                scenes.append((vis or "cinematic scenery", vo or vis))
+        """Parse ``Visual:`` / ``VO:`` lines into (visual, voiceover) scenes.
+
+        Line-based so scenes do not need blank lines between them (the built-in
+        templates and most LLM output put them on consecutive lines). A new
+        ``Visual:`` line, a second ``VO:`` line or a blank line closes the
+        current scene; unlabeled lines continue the previous field.
+        """
+        scenes: List[Tuple[str, str]] = []
+        vis: List[str] = []
+        vo: List[str] = []
+        current: Optional[List[str]] = None
+
+        def flush() -> None:
+            v, n = " ".join(vis).strip(), " ".join(vo).strip()
+            if v or n:
+                scenes.append((v or "cinematic scenery", n or v))
+            vis.clear()
+            vo.clear()
+
+        label = re.compile(r"^\s*(?:[-*\d.)\s]*)?(?:\*\*)?(visual|vo|voiceover|narration)(?:\*\*)?\s*:\s*(.*)$", re.IGNORECASE)
+        for raw in script.strip().splitlines():
+            line = raw.strip()
+            if not line:
+                flush()
+                current = None
+                continue
+            m = label.match(line)
+            if m:
+                kind, text = m.group(1).lower(), m.group(2).strip()
+                if kind == "visual":
+                    if vis or vo:
+                        flush()
+                    current = vis
+                else:
+                    if vo:
+                        flush()
+                    current = vo
+                if text:
+                    current.append(text)
+            elif current is not None:
+                current.append(line)
+        flush()
         return scenes
 
 # ----------------------------------------------------------------------------
