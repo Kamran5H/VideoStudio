@@ -332,8 +332,12 @@ class HardwareProbe:
 
 @dataclass
 class StudioConfig:
-    """Master configuration for the entire unified VideoStudio suite."""
-    output_dir: str = str(DEFAULT_OUTPUT_DIR)
+    """Master configuration for the entire unified VideoStudio suite.
+
+    The output folder is NOT a config field: it comes from the
+    VIDEOSTUDIO_OUTPUT_DIR environment variable (see DEFAULT_OUTPUT_DIR).
+    Unknown keys in an older studio_config.json are ignored by load().
+    """
     hf_token: str = ""
     colab_url: str = ""
     pexels_api_key: str = ""
@@ -343,13 +347,10 @@ class StudioConfig:
         "colab", "ltx", "cogvideox", "wan_official", "test_pattern"
     ])
     quota_wait_cap_min: int = 45
-    max_quota_waits_per_job: int = 2
-    max_deferrals_per_job: int = 48
-    wan_cooldown_hours: float = 3.0
+    max_deferrals_per_job: int = 48           # quota/network waits before a job is Failed
     allow_test_pattern_fallback: bool = False
     default_steps: int = 30
     default_guidance: float = 6.0
-    max_retries: int = 1
     max_job_retries: int = 3                  # hard cap: a job that keeps throwing
     # a NON-quota error is marked Failed after this many worker attempts instead
     # of looping forever and starving the rest of the queue
@@ -2540,7 +2541,7 @@ class VideoStudio:
             self.video_engine.freeze_extend(current_vid, vo_dur + 0.4, extended)
             current_vid = extended
             video_dur = ffprobe_duration(current_vid)
-        mixed_audio = job_dir / "mixed_audio.aac"
+        mixed_audio = job_dir / "mixed_audio.m4a"   # MP4 container: exact duration (raw .aac is estimated)
         self.audio_engine.mix_and_duck_audio(vo_file, sett.music_mood, video_dur, mixed_audio)
 
         # 7. Subtitles
@@ -2724,7 +2725,7 @@ class VideoStudio:
             run_ffmpeg([*vo_inputs, "-filter_complex", vo_timeline_filter(slots), "-map", "[outa]",
                         "-c:a", "libmp3lame", str(full_vo)])
 
-        mixed_audio = job_dir / "final_mixed_audio.aac"
+        mixed_audio = job_dir / "final_mixed_audio.m4a"
         self.audio_engine.mix_and_duck_audio(full_vo, sett.music_mood, tot_dur, mixed_audio)
 
         # 5. Subtitles
@@ -2989,7 +2990,7 @@ def main():
         print("🎬 VideoStudio Pro Hardware & Environment Diagnostics")
         print("=" * 60)
         print(studio.probe.summary())
-        print(f"Output Directory: {studio.config.output_dir}")
+        print(f"Output Directory: {DEFAULT_OUTPUT_DIR}")
         print("Backends Active: " + ", ".join(studio.config.backend_order))
         print("=" * 60 + "\n")
         studio.queue.shutdown()

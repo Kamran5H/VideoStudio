@@ -317,6 +317,22 @@ class BackendTimeoutTests(unittest.TestCase):
             self.assertFalse(vs.looks_like_prompt(bad), bad[:30])
 
 
+class ConfigCompatTests(unittest.TestCase):
+    def test_old_config_with_retired_fields_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "studio_config.json"
+            path.write_text(
+                '{"output_dir": "C:/old", "wan_cooldown_hours": 3, "max_retries": 1,'
+                ' "max_quota_waits_per_job": 2, "colab_url": "https://x.gradio.live",'
+                ' "max_deferrals_per_job": 5}',
+                encoding="utf-8",
+            )
+            cfg = vs.StudioConfig.load(path)
+            self.assertEqual((cfg.colab_url, cfg.max_deferrals_per_job), ("https://x.gradio.live", 5))
+            cfg.save(path)
+            self.assertNotIn("wan_cooldown_hours", path.read_text(encoding="utf-8"))
+
+
 class HFClientTests(unittest.TestCase):
     def test_token_is_passed_with_the_keyword_the_client_accepts(self):
         try:
