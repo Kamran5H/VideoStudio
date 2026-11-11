@@ -13,11 +13,20 @@
 
 ---
 
-## What it does
+## Using it (no experience needed)
+
+1. Double-click **VideoStudio** on your desktop (or run `python app.py`). Your browser opens the studio.
+2. **🎬 Quick clip:** describe what the video should show, pick a shape (Wide, Tall or Square) and a length, then press **Make my video**.
+   **📖 Story video:** type a topic, press **Write the script for me** (or paste your own), then press **Make my video**.
+3. Watch the status card. When it says ✅ Completed, use the ⬇ button on the player to download.
+
+Voice language, music, subtitles, quality and visual style are under **More options**. API keys are optional and go in **⚙️ Settings**.
+
+## What happens behind the button
 
 VideoStudio runs on your computer, but the heavy diffusion work is sent to free cloud GPUs. FFmpeg then assembles the finished video on your machine.
 
-**🌟 AI Video tab** (text-to-video):
+**🎬 Quick clip** (text-to-video):
 1. **Prompt enhancement.** Gemini (if you set a key) rewrites the prompt. If not, a free Pollinations text model does it, and an offline style template is the last fallback.
 2. **Generation in 5-second chunks.** Each chunk is chained to the next through its last frame. Backends are tried in order:
    - your own **Colab T4 worker** running Wan2.1-T2V-1.3B ([`colab_worker.ipynb`](colab_worker.ipynb))
@@ -25,10 +34,10 @@ VideoStudio runs on your computer, but the heavy diffusion work is sent to free 
    - **CogVideoX-5B** (HF Space)
    - the public **Wan2.1-14B** Space queue
 3. **When free GPU quota runs out**, the job waits and resumes by itself. Finished chunks are checkpointed to disk, so nothing is re-generated. If every backend is genuinely down, the studio uses stock footage or an AI still image with **Ken Burns** motion instead.
-4. **Post-processing with FFmpeg:** crossfades, optional 60 fps motion interpolation, and an aspect-preserving Lanczos **upscale** to 720p, 1080p or 4K.
-5. **Audio and output:** **Edge-TTS** narration (gTTS as fallback) in 10 languages, background music with ducking under the voice, word-timed **SRT subtitles** (optionally translated and burned in), plus an optional watermark.
+4. **Post-processing with FFmpeg:** crossfades and an aspect-preserving Lanczos **upscale** to 720p, 1080p or 4K.
+5. **Audio:** if you typed narration, **Edge-TTS** speaks it (gTTS as fallback) in 10 languages with word-timed subtitles. Background music ducks under the voice. With no narration, the clip gets music only.
 
-**📜 Storyboard tab** (script-to-video). You write, or have Gemini draft, `Visual:` / `VO:` lines. Each scene gets:
+**📖 Story video** (script-to-video). You write, or have Gemini draft, `Visual:` / `VO:` lines. Each scene gets:
 - a stock clip from Pexels or Pixabay, or a still image from Wikimedia or Pollinations, animated with Ken Burns motion
 - its own narration
 
@@ -63,7 +72,7 @@ copy .env.example .env          # optional; macOS/Linux: cp
 python app.py                   # opens http://127.0.0.1:7860
 ```
 
-On Windows you can also double-click `Start Video Studio.bat`, or run `run_videostudio.vbs` for a silent background launch. `python video_studio.py --probe` prints hardware and backend diagnostics.
+On Windows, `run_videostudio.vbs` starts the studio silently in the background and opens the browser. Point a desktop shortcut at `wscript.exe "<repo>\run_videostudio.vbs"` with `videostudio.ico` as its icon. `Start Video Studio.bat` does the same in a visible console window, which is handy for seeing errors. `python video_studio.py --probe` prints hardware and backend diagnostics.
 
 ### Optional: free Colab GPU worker
 1. Open [`colab_worker.ipynb`](colab_worker.ipynb) in Google Colab.
@@ -72,9 +81,7 @@ On Windows you can also double-click `Start Video Studio.bat`, or run `run_video
 
 ## Refresh and job recovery
 
-Jobs run in the local worker thread, not in the browser, so refreshing the page reconnects to the saved queue. Interrupted jobs resume from their last checkpoint when the studio restarts. Only one studio process at a time owns the queue; a second instance opens view-only.
-
-Creative form values are kept in the browser tab's session storage. API keys are never stored there.
+Jobs run in the local worker thread, not in the browser, so refreshing or closing the page doesn't stop a video. On reload, each tab shows its running job or its latest finished video. Interrupted jobs resume from their last checkpoint when the studio restarts. Only one studio process at a time owns the queue; a second instance opens view-only.
 
 ## Development
 
@@ -90,7 +97,7 @@ Tests write to a temporary output folder, never your `outputs/`. `test_verify.py
 ## Repository layout
 
 ```text
-app.py                 Gradio UI (tabs, live job cards, draft restore)
+app.py                 Gradio UI: Quick clip, Story video, Settings
 video_studio.py        Pipeline: backends, media fetch, TTS, subtitles, FFmpeg engine, job queue
 colab_worker.ipynb     Free Colab GPU worker exposing /generate for Wan2.1-T2V-1.3B
 tests/                 Offline unit and FFmpeg regression tests

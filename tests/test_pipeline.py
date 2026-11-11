@@ -55,15 +55,10 @@ class ScriptParserTests(unittest.TestCase):
         )
         self.assertEqual(scenes, [("forest at dawn", "Light returns to the valley."), ("river", "river")])
 
-    def test_builtin_story_templates_have_multiple_scenes(self):
-        try:
-            import app  # noqa: F401
-        except ImportError:
-            self.skipTest("gradio not installed")
-        import app as app_mod
-        for key, preset in app_mod.DEMO_STORY_PRESETS.items():
-            with self.subTest(template=key):
-                self.assertEqual(len(self.studio._parse_script_scenes(preset[1])), 3)
+    def test_generated_fallback_script_parses_into_scenes(self):
+        script = vs.FreeLLMPromptEnhancer.generate_script("Oceans", 4, "English", vs.StudioConfig(gemini_api_key=""))
+        with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            self.assertGreaterEqual(len(self.studio._parse_script_scenes(script)), 2)
 
 
 class PureHelperTests(unittest.TestCase):
@@ -445,14 +440,6 @@ class FFmpegPipelineTests(unittest.TestCase):
         w, h = vs.probe_video_size(out)
         self.assertEqual(w, 720)
         self.assertGreater(h, w)
-
-    def test_watermark_keeps_audio(self):
-        src = self._clip("v.mp4", 320, 240, audio=True)
-        logo = self.tmp / "logo.png"
-        vs.run_ffmpeg(["-f", "lavfi", "-i", "color=c=red:size=64x64", "-frames:v", "1", str(logo)])
-        out = self.tmp / "wm.mp4"
-        vs.VideoEngine.apply_watermark(src, logo, out)
-        self.assertIn("Audio:", vs._ffmpeg_info(out))
 
     def test_burn_subtitles_handles_awkward_folder_names(self):
         folder = self.tmp / "Kami's videos, v2"

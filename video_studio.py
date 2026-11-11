@@ -13,7 +13,6 @@ All-in-One Architecture:
   8. Video Compositor & FX            — VideoEngine (Ken Burns 3D Zoom, 60fps Interpolation, 4K Upscale, Watermark, Anti-Fingerprint)
   9. Pipeline Orchestrator            — VideoStudioPro (AI Diffusion, Multi-Scene Storyboards, Hybrid Storytelling)
  10. Persistent Batch Job Queue       — JobQueue (JSON persistence, auto-retry on quota refresh, live callbacks)
- 11. Native Desktop GUI Fallback      — VideoStudioDesktopGUI (Dark theme Tkinter GUI)
 """
 
 from __future__ import annotations
@@ -1678,7 +1677,7 @@ class SubtitleEngine:
 # ----------------------------------------------------------------------------
 
 class VideoEngine:
-    """Ken Burns 3D motion, transitions, motion interpolation, upscaling, and watermarking."""
+    """Ken Burns motion, crossfades, motion interpolation and upscaling."""
 
     @staticmethod
     def image_to_video_ken_burns(
@@ -1826,30 +1825,6 @@ class VideoEngine:
                     "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
         return out_path
 
-    @staticmethod
-    def apply_watermark(video_path: Path, watermark_path: Path, out_path: Path, position: str = "bottom_right") -> Path:
-        """Applies a branded watermark / logo overlay."""
-        pos_map = {
-            "bottom_right": "main_w-overlay_w-20:main_h-overlay_h-20",
-            "top_right": "main_w-overlay_w-20:20",
-            "top_left": "20:20",
-            "bottom_left": "20:main_h-overlay_h-20",
-        }
-        overlay_pos = pos_map.get(position, pos_map["bottom_right"])
-        filter_complex = f"[1:v]scale=120:-1,format=rgba,colorchannelmixer=aa=0.75[wm];[0:v][wm]overlay={overlay_pos}[outv]"
-        # Map the source audio explicitly: with only "-map [outv]" ffmpeg drops
-        # the narration/music track entirely.
-        run_ffmpeg(["-i", str(video_path), "-i", str(watermark_path), "-filter_complex", filter_complex,
-                    "-map", "[outv]", "-map", "0:a?", "-c:a", "copy", "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p", str(out_path)])
-        return out_path
-
-    @staticmethod
-    def anti_fingerprint_filter(video_path: Path, out_path: Path) -> Path:
-        """Applies subtle anti-fingerprint filter for social media uniqueness."""
-        vf = "eq=contrast=1.01:brightness=0.005:saturation=1.02,scale=trunc(iw*1.002/2)*2:trunc(ih*1.002/2)*2"
-        run_ffmpeg(["-i", str(video_path), "-vf", vf, "-map_metadata", "-1", "-c:a", "copy", "-c:v", "libx264", str(out_path)])
-        return out_path
 
 # ----------------------------------------------------------------------------
 # 9. Pipeline Orchestrator & Job Queue
@@ -1897,9 +1872,7 @@ class JobSettings:
     subtitles_enabled: bool = True
     subtitle_style: str = "Neon Glow"
     translate_lang: str = "None"
-    interpolate_60fps: bool = True
-    anti_fingerprint: bool = True
-    watermark_logo: bool = False
+    interpolate_60fps: bool = False
     seed: int = -1
     created_at: float = field(default_factory=time.time)
 
@@ -2529,8 +2502,11 @@ class VideoStudio:
 
         # 6. Audio Narration & Music Ducking
         progress_cb(sett.job_id, Stage.AUDIO, 0.88, "Synthesizing voiceover & mixing music...")
-        vo_text = sett.voice_script.strip() or sett.prompt.strip()
-        vo_file, events = self.audio_engine.generate_voiceover(vo_text, sett.language, sett.voice_gender)
+        vo_text = sett.voice_script.strip()
+        vo_file: Optional[Path] = None
+        events: List[dict] = []
+        if vo_text:     # no narration typed -> music only (the prompt is not read aloud)
+            vo_file, events = self.audio_engine.generate_voiceover(vo_text, sett.language, sett.voice_gender)
         video_dur = ffprobe_duration(current_vid)
         vo_dur = ffprobe_duration(vo_file) if vo_file and Path(vo_file).exists() else 0.0
         # If the narration runs longer than the footage, hold the last frame so
@@ -2559,7 +2535,7 @@ class VideoStudio:
         current_vid = with_audio
 
         # Burn Subtitles if enabled
-        if sett.subtitles_enabled:
+        if sett.subtitles_enabled and events:
             progress_cb(sett.job_id, Stage.SUBTITLES, 0.94, "Burning styled subtitles...")
             burned = job_dir / "with_subs.mp4"
             try:
@@ -2568,19 +2544,7 @@ class VideoStudio:
             except Exception as e:
                 log.warning("Subtitle burning fallback: %s", e)
 
-        # Watermark
-        if sett.watermark_logo:
-            logo = ASSETS_DIR / "kaami_makes_logo.png"
-            if logo.exists():
-                wm_vid = job_dir / "watermarked.mp4"
-                self.video_engine.apply_watermark(current_vid, logo, wm_vid)
-                current_vid = wm_vid
-
-        # Anti-fingerprint final render
-        if sett.anti_fingerprint:
-            self.video_engine.anti_fingerprint_filter(current_vid, out_mp4)
-        else:
-            shutil.copyfile(current_vid, out_mp4)
+        shutil.copyfile(current_vid, out_mp4)
 
         # Generate Thumbnail
         thumb = job_dir / "thumb.jpg"
@@ -2748,17 +2712,7 @@ class VideoStudio:
                 # Same policy as AI mode: keep the narrated video, ship the .srt.
                 log.warning("Subtitle burning skipped: %s", e)
 
-        if sett.watermark_logo:
-            logo = ASSETS_DIR / "kaami_makes_logo.png"
-            if logo.exists():
-                wm_vid = job_dir / "watermarked.mp4"
-                self.video_engine.apply_watermark(current_vid, logo, wm_vid)
-                current_vid = wm_vid
-
-        if sett.anti_fingerprint:
-            self.video_engine.anti_fingerprint_filter(current_vid, out_mp4)
-        else:
-            shutil.copyfile(current_vid, out_mp4)
+        shutil.copyfile(current_vid, out_mp4)
 
         thumb = job_dir / "thumb.jpg"
         run_ffmpeg(["-ss", "0.5", "-i", str(out_mp4), "-vframes", "1", "-q:v", "2", str(thumb)])
@@ -2862,116 +2816,6 @@ class VideoStudio:
         flush()
         return scenes
 
-# ----------------------------------------------------------------------------
-# 10. Native Desktop GUI Fallback (Tkinter)
-# ----------------------------------------------------------------------------
-
-class VideoStudioDesktopGUI:
-    """Standalone Desktop GUI for VideoStudio Pro with Dark Theme."""
-
-    def __init__(self, studio: VideoStudio):
-        self.studio = studio
-        import tkinter as tk
-        from tkinter import ttk
-
-        self.root = tk.Tk()
-        self.root.title("VideoStudio Pro — AI Video & Storyboard Studio [Kamran Ashraf / Kami]")
-        self.root.geometry("1100x750")
-        self.root.configure(bg="#0b0d17")
-
-        # Styling
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure(".", background="#0b0d17", foreground="#e6e8f2")
-        style.configure("TLabel", background="#0b0d17", foreground="#e6e8f2", font=("Segoe UI", 10))
-        style.configure("TButton", background="#6366F1", foreground="#ffffff", font=("Segoe UI", 10, "bold"), borderwidth=0)
-        style.map("TButton", background=[("active", "#a855f7")])
-
-        # Header
-        header = tk.Label(
-            self.root,
-            text="🎬 VideoStudio Pro — Master AI Video Creation Suite",
-            font=("Segoe UI", 16, "bold"),
-            bg="#0b0d17", fg="#c7d2fe"
-        )
-        header.pack(pady=12)
-
-        # Tabs
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True, padx=15, pady=8)
-
-        # Tab 1: AI Diffusion Video
-        tab1 = ttk.Frame(notebook)
-        notebook.add(tab1, text="  🌟 AI Video Studio  ")
-
-        tk.Label(tab1, text="Prompt Idea:").pack(anchor="w", padx=10, pady=4)
-        self.prompt_entry = tk.Entry(tab1, bg="#12152b", fg="#ffffff", font=("Segoe UI", 11), insertbackground="white")
-        self.prompt_entry.pack(fill="x", padx=10, pady=4)
-        self.prompt_entry.insert(0, "A futuristic cybernetic falcon soaring over neon skyscrapers at sunset")
-
-        # Style & Quality row
-        row1 = ttk.Frame(tab1)
-        row1.pack(fill="x", padx=10, pady=8)
-        tk.Label(row1, text="Style Preset:").pack(side="left")
-        self.style_var = tk.StringVar(value="Cinematic")
-        style_cb = ttk.Combobox(row1, textvariable=self.style_var, values=list(STYLE_PRESETS.keys()), width=15)
-        style_cb.pack(side="left", padx=8)
-
-        tk.Label(row1, text="Quality:").pack(side="left", padx=8)
-        self.quality_var = tk.StringVar(value="1080p")
-        q_cb = ttk.Combobox(row1, textvariable=self.quality_var, values=QUALITY_TIERS, width=8)
-        q_cb.pack(side="left")
-
-        tk.Label(row1, text="Aspect Ratio:").pack(side="left", padx=8)
-        self.aspect_var = tk.StringVar(value="16:9")
-        asp_cb = ttk.Combobox(row1, textvariable=self.aspect_var, values=list(ASPECT_SIZES.keys()), width=8)
-        asp_cb.pack(side="left")
-
-        # Tab 2: Script Storyboard
-        tab2 = ttk.Frame(notebook)
-        notebook.add(tab2, text="  📜 Script Storyboard  ")
-
-        tk.Label(tab2, text="Topic / Idea:").pack(anchor="w", padx=10, pady=4)
-        self.story_topic = tk.Entry(tab2, bg="#12152b", fg="#ffffff", font=("Segoe UI", 11), insertbackground="white")
-        self.story_topic.pack(fill="x", padx=10, pady=4)
-        self.story_topic.insert(0, "Top 3 unbelievable facts about deep sea ocean exploration")
-
-        tk.Label(tab2, text="Multi-Scene Script (Visual: ... VO: ...):").pack(anchor="w", padx=10, pady=4)
-        self.script_text = tk.Text(tab2, bg="#12152b", fg="#ffffff", height=8, font=("Segoe UI", 10))
-        self.script_text.pack(fill="both", expand=True, padx=10, pady=4)
-
-        # Generate Buttons
-        btn_frame = ttk.Frame(self.root)
-        btn_frame.pack(fill="x", padx=15, pady=8)
-
-        gen_btn = ttk.Button(btn_frame, text="🚀 Launch Modern Web Studio (Gradio UI)", command=self._open_web_ui)
-        gen_btn.pack(side="left", padx=6)
-
-        # Live Log Viewer
-        log_frame = ttk.LabelFrame(self.root, text="System Log Console")
-        log_frame.pack(fill="both", expand=True, padx=15, pady=8)
-
-        self.log_text = tk.Text(log_frame, bg="#07090f", fg="#34d399", height=8, font=("Consolas", 9))
-        self.log_text.pack(fill="both", expand=True)
-
-        self.root.after(300, self._poll_logs)
-
-    def _open_web_ui(self):
-        import webbrowser
-        webbrowser.open("http://127.0.0.1:7860")
-
-    def _poll_logs(self):
-        while not log_queue.empty():
-            try:
-                msg = log_queue.get_nowait()
-                self.log_text.insert("end", msg + "\n")
-                self.log_text.see("end")
-            except Exception:
-                break
-        self.root.after(300, self._poll_logs)
-
-    def run(self):
-        self.root.mainloop()
 
 # ----------------------------------------------------------------------------
 # Main Execution Entrypoint
@@ -2979,7 +2823,6 @@ class VideoStudioDesktopGUI:
 
 def main():
     parser = argparse.ArgumentParser(description="VideoStudio Pro — Unified AI Video Creation Studio")
-    parser.add_argument("--gui", action="store_true", help="Launch native Tkinter Desktop GUI")
     parser.add_argument("--web", action="store_true", help="Launch Gradio Web Studio")
     parser.add_argument("--probe", action="store_true", help="Run hardware diagnostics probe")
     args = parser.parse_args()
@@ -2996,15 +2839,11 @@ def main():
         studio.queue.shutdown()
         return
 
-    if args.gui:
-        studio = VideoStudio()
-        VideoStudioDesktopGUI(studio).run()
-    else:
-        # Web path: app.py creates its own single VideoStudio at import time.
-        # Do NOT build one here too, or the worker lock would make app's studio
-        # view-only (and jobs would never process).
-        import app
-        app.launch_app()
+    # Web path: app.py creates its own single VideoStudio at import time.
+    # Do NOT build one here too, or the worker lock would make app's studio
+    # view-only (and jobs would never process).
+    import app
+    app.launch_app()
 
 if __name__ == "__main__":
     main()
