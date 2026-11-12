@@ -32,6 +32,7 @@ from video_studio import (
     FreeLLMPromptEnhancer,
     JobSettings,
     JobStatus,
+    QualityError,
     Stage,
     VideoStudio,
     log,
@@ -321,6 +322,18 @@ def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> t
     )
 
 
+def files_for_video(video_path: Optional[str]) -> List[str]:
+    """Download companions for the currently displayed completed render."""
+    if not video_path:
+        return []
+    for job in STUDIO.queue.all_jobs():
+        if job.video_path and Path(job.video_path) == Path(video_path):
+            candidates = [Path(job.srt_path)] if job.srt_path else []
+            candidates.append(DEFAULT_OUTPUT_DIR / "jobs" / job.job_id / "render_report.json")
+            return [str(path) for path in candidates if path.is_file()]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Building jobs from (untrusted) form input
 # ---------------------------------------------------------------------------
@@ -332,7 +345,7 @@ def _standard_voice(voice: Any) -> str:
 
 
 def build_ai_settings(prompt, shape, seconds, narration, language, voice, music, subtitles,
-                      quality, style) -> JobSettings:
+                      quality, style, delivery="Engaging") -> JobSettings:
     return JobSettings(
         mode="ai_video",
         prompt=_text(prompt, TEXT_LIMITS["prompt"]),
@@ -342,6 +355,7 @@ def build_ai_settings(prompt, shape, seconds, narration, language, voice, music,
         language=_choice(language, LANGUAGES, "English"),
         voice_gender=_standard_voice(voice),
         use_my_voice=(voice == MY_VOICE),
+        narration_delivery=_choice(delivery, ["Natural", "Engaging", "Calm", "Energetic"], "Engaging"),
         music_mood=_choice(music, MUSIC, "Ambient"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -350,15 +364,17 @@ def build_ai_settings(prompt, shape, seconds, narration, language, voice, music,
     )
 
 
-def build_story_settings(topic, script, shape, language, voice, music, subtitles, style) -> JobSettings:
+def build_story_settings(topic, script, shape, language, voice, music, subtitles, style, scenes=4, delivery="Engaging") -> JobSettings:
     return JobSettings(
         mode="script_story",
         prompt=_text(topic, TEXT_LIMITS["topic"]) or "Story video",
         script_text=_text(script, TEXT_LIMITS["script"]),
+        scene_count=int(_number(scenes, 4, *STORY_SCENES)),
         aspect_ratio=_choice(shape, SHAPE_VALUES, "16:9"),
         language=_choice(language, LANGUAGES, "English"),
         voice_gender=_standard_voice(voice),
         use_my_voice=(voice == MY_VOICE),
+        narration_delivery=_choice(delivery, ["Natural", "Engaging", "Calm", "Energetic"], "Engaging"),
         music_mood=_choice(music, MUSIC, "Calm"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -395,11 +411,11 @@ def _follow_job(job_id: str, done_text: str):
         time.sleep(1.0)
 
 
-def make_clip(prompt, shape, seconds, narration, language, voice, music, subtitles, quality, style):
+def make_clip(prompt, shape, seconds, narration, language, voice, music, subtitles, quality, style, delivery="Engaging"):
     if not STUDIO.queue.is_worker:
         yield VIEW_ONLY, idle_card("This window is view-only."), None, ""
         return
-    sett = build_ai_settings(prompt, shape, seconds, narration, language, voice, music, subtitles, quality, style)
+    sett = build_ai_settings(prompt, shape, seconds, narration, language, voice, music, subtitles, quality, style, delivery)
     if not sett.prompt:
         yield "✏️ First, describe what the video should show.", idle_card("Waiting for your idea."), None, ""
         return
@@ -407,14 +423,14 @@ def make_clip(prompt, shape, seconds, narration, language, voice, music, subtitl
     yield from _follow_job(job_id, "🎉 Your video is ready! Use the ⬇ button on the player to download it.")
 
 
-def make_story(topic, script, shape, language, voice, music, subtitles, style):
+def make_story(topic, script, shape, language, voice, music, subtitles, style, scenes=4, delivery="Engaging"):
     if not STUDIO.queue.is_worker:
         yield VIEW_ONLY, idle_card("This window is view-only."), None, ""
         return
     if not _text(topic, 1) and not _text(script, 1):
         yield "✏️ Type a topic (or paste a script) first.", idle_card("Waiting for your topic."), None, ""
         return
-    sett = build_story_settings(topic, script, shape, language, voice, music, subtitles, style)
+    sett = build_story_settings(topic, script, shape, language, voice, music, subtitles, style, scenes, delivery)
     job_id = STUDIO.queue.submit(sett)
     yield from _follow_job(job_id, "🎉 Your story video is ready! Use the ⬇ button on the player to download it.")
 
@@ -431,9 +447,12 @@ def write_script(topic: str, scenes, language: str) -> str:
     if not text:
         return ""
     count = int(_number(scenes, 3, *STORY_SCENES))
-    return FreeLLMPromptEnhancer.generate_script(
-        text, count, _choice(language, LANGUAGES, "English"), STUDIO.config
-    )
+    try:
+        return FreeLLMPromptEnhancer.generate_script(
+            text, count, _choice(language, LANGUAGES, "English"), STUDIO.config
+        )
+    except QualityError as exc:
+        raise gr.Error(str(exc)) from exc
 
 
 def stop_job(job_id: str) -> str:
@@ -610,14 +629,118 @@ def _more_options(default_music: str, with_quality: bool):
     with gr.Accordion("More options (optional)", open=False):
         with gr.Row():
             language = gr.Dropdown(LANGUAGES, value="English", label="Voice language")
-            voice = gr.Radio(VOICES, value="Female", label="Voice")
+            voice = gr.Radio(VOICES, value=MY_VOICE if STUDIO.audio_engine.voice_cloner.has_sample() else "Female", label="Voice")
             music = gr.Dropdown(MUSIC, value=default_music, label="Background music")
         with gr.Row():
             style = gr.Dropdown(STYLES, value="Cinematic", label="Look / style")
             quality = gr.Dropdown(QUALITIES, value="1080p", label="Quality", visible=with_quality,
-                                  info="Higher = bigger file, slower")
+                                  info="Export size. Higher sizes are upscaled from the source, with larger files and slower renders.")
             subtitles = gr.Checkbox(value=True, label="Show subtitles on the video")
-    return language, voice, music, style, quality, subtitles
+        delivery = gr.Dropdown(["Natural", "Engaging", "Calm", "Energetic"], value="Engaging", label="Narrator delivery", info="Controls standard voice pacing. Cloned voices retain the model’s delivery.")
+    return language, voice, music, style, quality, subtitles, delivery
+
+
+def editor_render(path, start, end, shape, muted, caption, srt, position, size, narration=None, preview=True):
+    from local_editor import render_edit
+    if not path:
+        return None, "Import a video to begin."
+    try:
+        return render_edit(path, start, end, shape, muted, caption or "", srt, position, size, preview, narration)
+    except (ValueError, RuntimeError, OSError) as exc:
+        raise gr.Error(str(exc)) from exc
+
+
+def editor_join(paths, order):
+    from local_editor import join_clips
+    try:
+        paths = list(paths or [])
+        if str(order or "").strip():
+            indices = [int(value.strip()) - 1 for value in order.split(",")]
+            if sorted(indices) != list(range(len(paths))):
+                raise ValueError("Order must list every clip number once, for example 2,1,3.")
+            paths = [paths[i] for i in indices]
+        result = join_clips(paths)
+        return result, "Imported in this order: " + " → ".join(Path(p).name for p in paths)
+    except (ValueError, RuntimeError, OSError) as exc:
+        raise gr.Error(str(exc)) from exc
+
+
+def build_flow_workspace():
+    with gr.Tab("Google Flow & live editor", id="flow_editor"):
+        gr.Markdown(
+            "### Create in Google Flow, edit here\n"
+            "Use your signed-in Google account in Flow. No API key is needed for this workflow. "
+            "Your Google plan's limits apply. Download finished clips from Flow and import them below. "
+            "Account sign-in and generation stay in Google's browser workspace."
+        )
+        with gr.Row():
+            gr.Button("Open Google Flow", link="https://flow.google.com/", variant="primary")
+            gr.Button("Open Gemini", link="https://gemini.google.com/app")
+        with gr.Accordion("Plan an engaging voiceover in Gemini — no API key", open=False):
+            brief_topic = gr.Textbox(label="Topic and verified facts", lines=3)
+            brief_language = gr.Dropdown(LANGUAGES, value="Urdu", label="Script language")
+            brief_count = gr.Slider(2, 6, value=4, step=1, label="Scenes")
+            brief_button = gr.Button("Prepare Gemini request")
+            brief_output = gr.Textbox(label="Copy this request into Gemini; review the reply before using it", lines=8)
+            brief_button.click(browser_script_brief, [brief_topic, brief_language, brief_count], brief_output)
+        gr.Markdown("**1 · Import your clips**")
+        with gr.Accordion("Assemble several clips", open=False):
+            uploads = gr.File(label="Clips (numbered in the order listed)", file_count="multiple",
+                              file_types=[".mp4", ".mov", ".webm", ".mkv"])
+            order = gr.Textbox(label="Playback order", placeholder="Optional: 2,1,3")
+            join = gr.Button("Assemble clips")
+            join_status = gr.Markdown()
+        with gr.Row():
+            with gr.Column():
+                source = gr.Video(label="Source video — upload one clip or assemble above", sources=["upload"], interactive=True)
+                with gr.Row():
+                    start = gr.Number(value=0, minimum=0, label="Start (seconds)")
+                    end = gr.Number(value=0, minimum=0, label="End (seconds; 0 = end of video)")
+                shape = gr.Radio(["Original", "16:9", "9:16", "1:1"], value="Original", label="Frame shape (fit without cropping)")
+                muted = gr.Checkbox(value=False, label="Mute original sound")
+                narration = gr.Audio(label="Your complete voiceover (optional)", sources=["upload", "microphone"], type="filepath")
+                gr.Markdown("Record or upload the actual narration to use your exact recorded voice, including Urdu. "
+                            "It replaces source sound and starts at the beginning of the selected range. Mute applies to source sound only.")
+                caption = gr.Textbox(label="Short caption", placeholder="اردو عبارت یہاں لکھیں", lines=2,
+                                     info="Shown across the selected range. For timed subtitles, upload SRT below.")
+                srt = gr.File(label="Timed subtitles (.srt, UTF-8; times refer to the source video)", file_types=[".srt"])
+                position = gr.Radio(["Auto: less clutter", "Top", "Bottom"], value="Auto: less clutter", label="Caption placement")
+                size = gr.Slider(.7, 1.5, value=1, step=.1, label="Caption size")
+                gr.Markdown("Auto compares detail in the top and bottom bands. It does not detect faces; use the placement control when needed.")
+            with gr.Column():
+                preview_video = gr.Video(label="Live preview — first 8 seconds of your selection", interactive=False)
+                status = gr.Markdown("Import a video to begin.")
+                refresh = gr.Button("Refresh preview")
+                export = gr.Button("Export full selection", variant="primary")
+                download = gr.File(label="Download edited MP4", interactive=False)
+                gr.Markdown("Preview refreshes after a control change or when you leave the caption field. "
+                            "Export renders the full selected range. Original clips are retained.")
+        inputs = [source, start, end, shape, muted, caption, srt, position, size, narration]
+        join.click(editor_join, [uploads, order], [source, join_status], concurrency_id="local_editor", concurrency_limit=1)
+        for control in (source, start, end, shape, muted, srt, position, narration):
+            control.change(editor_render, inputs, [preview_video, status], concurrency_id="local_editor",
+                           concurrency_limit=1, trigger_mode="always_last")
+        caption.blur(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
+        size.release(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
+        refresh.click(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
+        export.click(lambda *args: editor_render(*args, preview=False), inputs, [download, status],
+                     concurrency_id="local_editor", concurrency_limit=1)
+
+
+def browser_script_brief(topic, language, scenes):
+    from video_studio import narration_brief
+    topic = _text(topic, 5000)
+    if not topic:
+        raise gr.Error("Add your topic and any facts you want included.")
+    language = _choice(language, LANGUAGES, "Urdu")
+    count = int(_number(scenes, 4, 2, 6))
+    return (
+        f"Write exactly {count} distinct video scenes in {language}. Topic and supplied facts: {topic}\n\n"
+        + narration_brief(language)
+        + "\nDo not invent claims, statistics or quotes. Identify any uncertain claims separately for review. "
+        "For each scene output Visual: followed by concrete English visual keywords, then VO: followed by "
+        f"spoken {language} narration. Keep the narration aligned to the visual."
+    )
 
 
 def build_app() -> gr.Blocks:
@@ -630,6 +753,7 @@ def build_app() -> gr.Blocks:
         last_story_video = gr.State("")
 
         with gr.Tabs():
+            build_flow_workspace()
             # ---------------------------------------------------------- Quick clip
             with gr.Tab("🎬 Quick clip", id="clip"):
                 with gr.Row(equal_height=False):
@@ -648,7 +772,7 @@ def build_app() -> gr.Blocks:
                             lines=2,
                         )
                         (clip_lang, clip_voice, clip_music, clip_style,
-                         clip_quality, clip_subs) = _more_options("Ambient", with_quality=True)
+                         clip_quality, clip_subs, clip_delivery) = _more_options("Ambient", with_quality=True)
                         with gr.Row():
                             clip_make = gr.Button("🎬 Make my video", variant="primary", scale=4, elem_classes=["vs-make"])
                             clip_stop = gr.Button("⏹ Stop", variant="stop", scale=1)
@@ -656,6 +780,7 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=5):
                         clip_card = gr.HTML(idle_card("Your video will appear here."))
                         clip_video = gr.Video(label="Your video", interactive=False, height=360)
+                        clip_files = gr.File(label="Captions and render report", file_count="multiple", interactive=False)
                         gr.Markdown("<span class='vs-hint'>A 5-second clip usually takes 1–3 minutes. "
                                     "Real AI video needs the free Hugging Face token (see Settings); "
                                     "if the free GPUs are busy, it waits and retries by itself.</span>")
@@ -664,10 +789,11 @@ def build_app() -> gr.Blocks:
                 clip_make.click(
                     make_clip,
                     [clip_prompt, clip_shape, clip_seconds, clip_narration, clip_lang, clip_voice,
-                     clip_music, clip_subs, clip_quality, clip_style],
+                     clip_music, clip_subs, clip_quality, clip_style, clip_delivery],
                     [clip_status, clip_card, clip_video, clip_job_id],
                 )
                 clip_stop.click(stop_job, clip_job_id, clip_status)
+                clip_video.change(files_for_video, clip_video, clip_files)
 
             # ---------------------------------------------------------- Story video
             with gr.Tab("📖 Story video", id="story"):
@@ -687,11 +813,11 @@ def build_app() -> gr.Blocks:
                                          "Visual: rivers flowing into the sea\n"
                                          "VO: Rivers have been doing this for millions of years."),
                             lines=7,
-                            info="Each scene = a 'Visual:' line (what to show) and a 'VO:' line (what to say).",
+                            info="Each scene needs a 'Visual:' line and a 'VO:' line. Review AI drafts and verify factual claims before rendering.",
                         )
                         story_shape = gr.Radio(SHAPES, value="9:16", label="Shape")
                         (story_lang, story_voice, story_music, story_style,
-                         _story_quality, story_subs) = _more_options("Calm", with_quality=False)
+                         _story_quality, story_subs, story_delivery) = _more_options("Calm", with_quality=False)
                         with gr.Row():
                             story_make = gr.Button("🎬 Make my video", variant="primary", scale=4, elem_classes=["vs-make"])
                             story_stop = gr.Button("⏹ Stop", variant="stop", scale=1)
@@ -699,6 +825,7 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=5):
                         story_card = gr.HTML(idle_card("Your video will appear here."))
                         story_video = gr.Video(label="Your video", interactive=False, height=420)
+                        story_files = gr.File(label="Captions and render report", file_count="multiple", interactive=False)
                         gr.Markdown("<span class='vs-hint'>Uses stock footage or AI pictures with gentle "
                                     "camera motion, a narrator voice, music and subtitles.</span>")
 
@@ -706,10 +833,11 @@ def build_app() -> gr.Blocks:
                 story_make.click(
                     make_story,
                     [story_topic, story_script, story_shape, story_lang, story_voice,
-                     story_music, story_subs, story_style],
+                     story_music, story_subs, story_style, story_scenes, story_delivery],
                     [story_status, story_card, story_video, story_job_id],
                 )
                 story_stop.click(stop_job, story_job_id, story_status)
+                story_video.change(files_for_video, story_video, story_files)
 
             # ---------------------------------------------------------- My voice
             with gr.Tab("🎙️ My voice", id="voice"):

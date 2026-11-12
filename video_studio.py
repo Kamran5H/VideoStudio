@@ -73,6 +73,10 @@ DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 WAN_NATIVE_FPS = 16                        # models generate at 16 fps natively
 CHUNK_SECONDS = 5.0                        # native clip length per generation call
 CROSSFADE_SECONDS = 0.5
+# Repeated intermediate encodes need enough headroom to retain texture and avoid
+# banding; faststart also makes exported MP4s begin playing before download ends.
+VIDEO_ENCODE_ARGS = ("-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                     "-pix_fmt", "yuv420p", "-movflags", "+faststart")
 
 
 def frames_for(seconds: float, fps: int = WAN_NATIVE_FPS) -> int:
@@ -189,6 +193,10 @@ def ffmpeg_exe() -> str:
 
 def ffprobe_exe() -> Optional[str]:
     return shutil.which("ffprobe")
+
+class QualityError(RuntimeError):
+    """A required creative asset is missing; the user can correct it or retry."""
+
 
 class FFmpegError(RuntimeError):
     """ffmpeg is missing, timed out, or exited non-zero."""
@@ -502,13 +510,14 @@ class PromptEngine:
         # "deterministic" offline enhancer gave different text on every launch.
         rng = random.Random(seed if seed is not None else zlib.crc32(prompt.encode("utf-8")))
         motion = rng.choice(_MOTION_HINTS)
+        # Put the actual subject first. Presets are visual treatment, not permission
+        # to replace a night scene with golden hour or move a subject to neon streets.
         parts = [
-            f"{style['prefix']} {prompt}.",
-            f"Camera: {style['camera']}.",
-            f"Lighting: {style['light']}.",
-            f"Color: {style['grade']}.",
-            f"Motion: {motion}, {style['mood']}.",
-            "Highly detailed, coherent scene geometry, professional composition, 8k resolution.",
+            f"{prompt}.",
+            f"Visual treatment: {preset if preset in STYLE_PRESETS else 'Cinematic'}; {style['grade']}.",
+            "Preserve the specified subjects, setting, time of day and action.",
+            "One continuous shot with restrained camera movement and scene-appropriate lighting.",
+            f"Motion: {motion}; stable identities, natural proportions and coherent geometry.",
         ]
         return " ".join(parts)
 
@@ -532,12 +541,27 @@ def looks_like_prompt(text: str) -> bool:
 SCRIPT_RETRY_PAUSE = 6.0      # seconds between attempts at the free script writer
 
 
-def looks_like_script(text: str) -> bool:
+def looks_like_script(text: str, scene_count: Optional[int] = None) -> bool:
     """A usable storyboard reply: labelled Visual:/VO: lines, not an error page."""
     t = (text or "").strip()
     if not t or t[0] in "<{[" or len(t) > 20000:
         return False
-    return bool(re.search(r"(?im)^\W*visual\W*:", t)) and bool(re.search(r"(?im)^\W*(vo|voiceover|narration)\W*:", t))
+    labels = list(re.finditer(r"(?im)^\W*(visual|vo|voiceover|narration)\W*:\s*", t))
+    if not labels or len(labels) % 2:
+        return False
+    if scene_count is not None and len(labels) != scene_count * 2:
+        return False
+    visuals = []
+    for i, label in enumerate(labels):
+        is_visual = label.group(1).lower() == "visual"
+        if is_visual != (i % 2 == 0):
+            return False
+        body = t[label.end():labels[i + 1].start() if i + 1 < len(labels) else len(t)].strip()
+        if not body:
+            return False
+        if is_visual:
+            visuals.append(body.casefold())
+    return len(visuals) == len(set(visuals))
 
 
 DEFAULT_GEMINI_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
@@ -552,12 +576,28 @@ def gemini_models() -> List[str]:
     return models or list(DEFAULT_GEMINI_MODELS)
 
 
+def narration_brief(language: str) -> str:
+    brief = (
+        "VOICEOVER DIRECTION: Speak to one curious viewer in a warm, conversational voice. "
+        "Open with a specific intriguing detail or an honest question; avoid generic introductions. "
+        "Build curiosity, explain using a concrete example, and resolve the opening question at the end. "
+        "Use varied, short spoken sentences with natural punctuation and breathing room. "
+        "Invite the viewer to notice or imagine something once when it fits; do not interrogate them repeatedly. "
+        "Give each scene one new idea in 12–30 spoken words. Match the visual to that exact idea. "
+        "Avoid clickbait, exaggerated promises, filler, repeated hooks and forced subscribe requests. "
+        "Write only words that should be spoken, without stage directions, emojis or performance labels. "
+    )
+    if language == "Urdu":
+        brief += (
+            "Use Urdu script and idiomatic Pakistani Urdu: conversational آپ، ذرا سوچیے، دیکھیے. "
+            "Prefer پانی، زندگی، وجہ، سوال، حقیقت، مثال over Sanskritized vocabulary. "
+            "Do not translate literally from English or output Devanagari. Preserve proper names and factual meaning. "
+        )
+    return brief
+
+
 class FreeLLMPromptEnhancer:
-    """Gemini AI Pro & Zero-Billing AI Director Engine.
-    Leverages Gemini Pro Plan with smart failover across free models (Gemini 2.5 Flash,
-    1.5 Flash, 2.0 Flash Lite, Pollinations, and Deterministic Cinema Templates).
-    Ensures 0$ billing, 0 token exhaustion crashes, and maximum cinematic quality.
-    """
+    """Prompt and storyboard drafting with configured providers and offline fallback."""
 
     @staticmethod
     def expand_with_ai(prompt: str, style: str = "Cinematic", config: Optional[StudioConfig] = None) -> str:
@@ -575,9 +615,10 @@ class FreeLLMPromptEnhancer:
                 client = genai.Client(api_key=gemini_key)
                 style_data = STYLE_PRESETS.get(style, STYLE_PRESETS["Cinematic"])
                 sys_inst = (
-                    f"You are an expert Hollywood AI video director and Veo 3 / Nano Banana prompt engineer. "
-                    f"Transform this idea into a breathtaking, hyper-detailed single-sentence video prompt in the '{style}' aesthetic ({style_data['prefix']}). "
-                    f"Specify camera ({style_data['camera']}), lighting ({style_data['light']}), and grade ({style_data['grade']}). "
+                    f"Rewrite the idea as one achievable continuous video shot in the '{style}' aesthetic. "
+                    "Preserve every specified subject, action, location, time of day and exclusion. "
+                    "Add only compatible camera and lighting details; do not invent events or extra subjects. "
+                    f"Suggested color treatment: {style_data['grade']}. "
                     "Output ONLY the prompt text, no commentary, under 75 words."
                 )
 
@@ -587,7 +628,7 @@ class FreeLLMPromptEnhancer:
                             model=model_name,
                             contents=f"{sys_inst}\n\nUser Concept: {clean_p}"
                         )
-                        if resp.text and len(resp.text.strip()) > 10:
+                        if resp.text and looks_like_prompt(resp.text):
                             return resp.text.strip().replace('"', '')
                     except Exception as e_mod:
                         log.debug("Gemini model %s note: %s", model_name, e_mod)
@@ -600,7 +641,10 @@ class FreeLLMPromptEnhancer:
             import urllib.parse
 
             import requests
-            q_enc = urllib.parse.quote(f"Expand into 50-word cinematic {style} video prompt: {clean_p}")
+            q_enc = urllib.parse.quote(
+                f"Rewrite as a single 50-word {style} video shot. Preserve the subject, action, "
+                f"setting and time of day exactly. No extra subjects or commentary. Idea: {clean_p}"
+            )
             resp = requests.get(f"https://text.pollinations.ai/{q_enc}", timeout=6)
             if resp.status_code == 200 and looks_like_prompt(resp.text):
                 return resp.text.strip().replace('"', '')
@@ -616,6 +660,7 @@ class FreeLLMPromptEnhancer:
         prompt = topic.strip()
         if not prompt:
             return ""
+        scene_count = max(1, min(int(scene_count), 6))
 
         cfg = config or StudioConfig.load()
         gemini_key = cfg.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -627,19 +672,24 @@ class FreeLLMPromptEnhancer:
                 client = genai.Client(api_key=gemini_key)
                 sys_inst = (
                     f"You are an award-winning documentary & cinematic video director. "
+                    f"For Urdu, use natural Pakistani Urdu vocabulary in Urdu script, avoiding Sanskritized Hindi wording. "
                     f"Write an engaging {scene_count}-scene video script about '{prompt}' in {language}. "
                     "For each scene, structure it EXACTLY as:\n\n"
-                    "Visual: [3-5 visual keywords for stock footage / Nano Banana generation, e.g., golden sunrise mountains drone aerial]\n"
+                    "Visual: [3-5 concrete visual keywords for footage or image generation, e.g., golden sunrise mountains drone aerial]\n"
                     f"VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
+                    "Give each scene a distinct purpose: hook, explanation, concrete detail, then payoff. "
+                    "Keep visuals specific to the narration and vary shot scale without changing the subject. "
+                    "Use cautious factual language. Do not invent statistics, quotations or historical claims. "
                     "Output ONLY the Visual: and VO: lines without headers or numbering."
                 )
+                sys_inst += "\n" + narration_brief(language)
                 for model_name in gemini_models():
                     try:
                         resp = client.models.generate_content(
                             model=model_name,
                             contents=sys_inst
                         )
-                        if resp.text and "Visual:" in resp.text:
+                        if resp.text and looks_like_script(resp.text, scene_count):
                             return resp.text.strip()
                     except Exception:
                         continue
@@ -655,17 +705,21 @@ class FreeLLMPromptEnhancer:
                 f"Write a {scene_count}-scene video script about '{prompt}'. For each scene output exactly "
                 "two lines. Visual: 3-6 English keywords for stock footage. "
                 f"VO: 1-2 sentences of spoken narration in {language}. "
+                "For Urdu use Urdu script and natural Pakistani Urdu vocabulary, not Sanskritized Hindi. "
+                "Use distinct, topic-specific scenes with a hook, explanation and payoff. "
+                "Do not invent statistics, quotes or factual claims. "
                 "Output only the Visual: and VO: lines, no titles, no numbering."
             )
+            ask += "\n" + narration_brief(language)
             url = f"https://text.pollinations.ai/{urllib.parse.quote(ask)}"
             # The free tier queues behind image requests from the same address,
             # and sometimes answers 402/429 for a few seconds, so allow a slow
-            # answer and two retries before using the offline template.
+            # answer and two retries before reporting that the service is unavailable.
             for attempt in range(3):
                 try:
                     resp = requests.get(url, timeout=60)
                     text = resp.text.strip() if resp.status_code == 200 else ""
-                    if looks_like_script(text):
+                    if looks_like_script(text, scene_count):
                         return text
                     log.info("Free script writer gave no usable script (HTTP %s)", resp.status_code)
                 except requests.RequestException as exc:
@@ -675,24 +729,10 @@ class FreeLLMPromptEnhancer:
         except Exception as exc:
             log.debug("Pollinations script fallback: %s", exc)
 
-        # 3. Offline template (English), honouring the requested scene count
-        template = [
-            (f"{prompt} aerial dramatic cinematic",
-             f"Welcome to an exploration of {prompt}. Every detail tells a story of wonder and discovery."),
-            (f"{prompt} close up detail macro lighting",
-             "When we look closer, we uncover the hidden beauty and intricate dynamics at play."),
-            (f"{prompt} people everyday life",
-             f"For many of us, {prompt} is closer to daily life than we ever notice."),
-            (f"{prompt} epic landscape golden hour",
-             "Seen from a distance, the bigger picture finally comes together."),
-            (f"{prompt} slow motion detail",
-             "Slow down for a moment, and the small things start to matter."),
-            (f"{prompt} inspiring sunrise horizon",
-             f"And that is the story of {prompt}. Thank you for watching."),
-        ]
-        count = max(1, min(int(scene_count), len(template)))
-        picked = template[:count - 1] + [template[-1]] if count > 1 else template[:1]
-        return "\n\n".join(f"Visual: {v}\nVO: {n}" for v, n in picked)
+        raise QualityError(
+            f"The script services are unavailable. Paste a script in {language} or try again later. "
+            "A Gemini API key can be configured in Settings."
+        )
 
 # ----------------------------------------------------------------------------
 # 4. Generative AI Video Backends
@@ -1230,7 +1270,7 @@ class TestPatternBackend(GenerationBackend):
         progress("Generating test pattern verification clip...")
         duration = max(req.num_frames / req.fps, 2.0)
         vf = f"testsrc=duration={duration}:size={req.width}x{req.height}:rate={req.fps},format=yuv420p"
-        run_ffmpeg(["-f", "lavfi", "-i", vf, "-t", str(duration), "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+        run_ffmpeg(["-f", "lavfi", "-i", vf, "-t", str(duration), *VIDEO_ENCODE_ARGS, str(out_path)])
         return out_path
 
 # ----------------------------------------------------------------------------
@@ -1246,6 +1286,28 @@ class MediaFetcher:
         self.config = config or StudioConfig()
         self.cache_dir = DEFAULT_OUTPUT_DIR / "media_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._recent_assets: List[str] = []
+
+    def _stock_asset(self, source: str, asset_id: Any, url: str, suffix: str,
+                     min_bytes: int) -> Optional[str]:
+        """Reuse downloaded files and remember recent selections for shot variety."""
+        key = f"{source}_{zlib.crc32(str(asset_id).encode()):08x}_{zlib.crc32(url.encode()):08x}"
+        out = self.cache_dir / f"{key}{suffix}"
+        got = str(out) if out.exists() and out.stat().st_size >= min_bytes else self._download(
+            url, out, min_bytes=min_bytes, timeout=60
+        )
+        if got:
+            self._recent_assets.append(f"{source}:{asset_id}")
+            self._recent_assets = self._recent_assets[-100:]
+        return got
+
+    @staticmethod
+    def _framing_score(item: dict, width: int, height: int) -> float:
+        """Prefer files that retain detail after the requested aspect-ratio crop."""
+        w, h = item.get("width", 0), item.get("height", 0)
+        if not w or not h:
+            return float("inf")
+        return abs(math.log((w / h) / (width / height))) * 4 + max(width / w, height / h)
 
     def fetch_scene_visual(
         self,
@@ -1258,9 +1320,9 @@ class MediaFetcher:
     ) -> Tuple[str, str]:
         """Fetches the best visual asset for a scene: returns (file_path, media_type: 'video'|'image').
 
-        ``previous`` is the asset of the scene before this one; if every
-        source fails it is reused, which keeps the video on topic instead of
-        cutting to an unrelated placeholder picture.
+        ``previous`` may be supplied for another chunk of the same scene. It is
+        reused only if every provider fails. A new storyboard scene should not
+        use this option: the previous visual may not illustrate its narration.
         """
         clean_q = re.sub(r"[^\w\s]", " ", prompt).strip()
 
@@ -1312,9 +1374,10 @@ class MediaFetcher:
             log.warning("No new visual found for %r; reusing the previous scene's.", clean_q[:40])
             return previous
 
-        # 7. Generate Synthetic Gradient Image
-        synth_img = self._generate_synthetic_image(prompt, target_width, target_height)
-        return synth_img, "image"
+        raise QualityError(
+            f"No usable visual was found for '{prompt[:100]}'. "
+            "Try a more specific visual description, configure a stock media key in Settings, or retry later."
+        )
 
     @staticmethod
     def _download(url: str, out: Path, min_bytes: int = 1024, timeout: int = 30,
@@ -1352,27 +1415,21 @@ class MediaFetcher:
         orientation = "portrait" if height > width else "landscape"
         resp = requests.get(
             "https://api.pexels.com/videos/search",
-            params={"query": query, "per_page": 5, "orientation": orientation},
+            params={"query": query, "per_page": 12, "orientation": orientation},
             headers=headers, timeout=10,
         )
         if resp.status_code == 200:
             data = resp.json()
             videos = data.get("videos", [])
-            if videos:
-                best_file = None
-                for v in videos:
-                    for vf in v.get("video_files", []):
-                        if vf.get("quality") == "hd" or vf.get("width", 0) >= 1280:
-                            best_file = vf.get("link")
-                            break
-                    if best_file:
-                        break
-                if not best_file and videos[0].get("video_files"):
-                    best_file = videos[0]["video_files"][0].get("link")
-
-                if best_file:
-                    out = self.cache_dir / f"pexels_{uuid.uuid4().hex[:8]}.mp4"
-                    return self._download(best_file, out, min_bytes=50_000, timeout=60)
+            videos.sort(key=lambda v: f"pexels:{v.get('id')}" in self._recent_assets)
+            for v in videos:
+                files = [f for f in v.get("video_files", [])
+                         if f.get("link") and f.get("file_type", "video/mp4") == "video/mp4"]
+                files.sort(key=lambda f: self._framing_score(f, width, height))
+                for vf in files:
+                    got = self._stock_asset("pexels", v.get("id", vf["link"]), vf["link"], ".mp4", 50_000)
+                    if got:
+                        return got
         return None
 
     def _search_pixabay_video(self, query: str) -> Optional[str]:
@@ -1381,17 +1438,19 @@ class MediaFetcher:
         # echoed into logs / exception messages.
         resp = requests.get(
             "https://pixabay.com/api/videos/",
-            params={"key": self.config.pixabay_api_key, "q": query, "per_page": 3},
+            params={"key": self.config.pixabay_api_key, "q": query, "per_page": 12},
             timeout=10,
         )
         if resp.status_code == 200:
             hits = resp.json().get("hits", [])
-            if hits:
-                vids = hits[0].get("videos", {})
+            hits.sort(key=lambda v: f"pixabay:{v.get('id')}" in self._recent_assets)
+            for hit in hits:
+                vids = hit.get("videos", {})
                 chosen = vids.get("large") or vids.get("medium") or vids.get("small")
                 if chosen and chosen.get("url"):
-                    out = self.cache_dir / f"pixabay_{uuid.uuid4().hex[:8]}.mp4"
-                    return self._download(chosen["url"], out, min_bytes=50_000, timeout=60)
+                    got = self._stock_asset("pixabay", hit.get("id", chosen["url"]), chosen["url"], ".mp4", 50_000)
+                    if got:
+                        return got
         return None
 
     def _search_pexels_photo(self, query: str, width: int, height: int) -> Optional[str]:
@@ -1400,16 +1459,19 @@ class MediaFetcher:
         orientation = "portrait" if height > width else "landscape"
         resp = requests.get(
             "https://api.pexels.com/v1/search",
-            params={"query": query, "per_page": 3, "orientation": orientation},
+            params={"query": query, "per_page": 12, "orientation": orientation},
             headers=headers, timeout=10,
         )
         if resp.status_code == 200:
             photos = resp.json().get("photos", [])
-            if photos:
-                src = photos[0].get("src", {}).get("large2x") or photos[0].get("src", {}).get("large")
+            photos.sort(key=lambda p: (f"pexels_photo:{p.get('id')}" in self._recent_assets,
+                                       self._framing_score(p, width, height)))
+            for photo in photos:
+                src = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("large")
                 if src:
-                    out = self.cache_dir / f"pexels_img_{uuid.uuid4().hex[:8]}.jpg"
-                    return self._download(src, out, min_bytes=5_000)
+                    got = self._stock_asset("pexels_photo", photo.get("id", src), src, ".jpg", 5_000)
+                    if got:
+                        return got
         return None
 
     def _search_wikimedia(self, query: str) -> Optional[str]:
@@ -1438,9 +1500,9 @@ class MediaFetcher:
     def _generate_pollinations_image(self, prompt: str, width: int, height: int, style: str) -> Optional[str]:
         import urllib.parse
         # Callers may pass an already-styled prompt (the AI-clip fallback does).
-        styled = any(prompt.startswith(p["prefix"]) for p in STYLE_PRESETS.values())
+        styled = "Visual treatment:" in prompt or any(prompt.startswith(p["prefix"]) for p in STYLE_PRESETS.values())
         enhanced = prompt if styled else PromptEngine().enhance(prompt, preset=style)
-        encoded = urllib.parse.quote(enhanced[:300])
+        encoded = urllib.parse.quote(enhanced[:1500])
         # Snap dimensions to valid multiples
         w = (width // 64) * 64
         h = (height // 64) * 64
@@ -1459,11 +1521,11 @@ class MediaFetcher:
         return None
 
     def generate_nano_banana_frame(self, prompt: str, width: int = 1920, height: int = 1080, style: str = "Hyper-realistic") -> str:
-        """Generates a stunning photorealistic 4K scene frame / visual pic without paid tokens or billing."""
+        """Compatibility entry point for generating a still through the image provider."""
         ai_img = self._generate_pollinations_image(prompt, width, height, style)
         if ai_img and Path(ai_img).exists():
             return ai_img
-        return self._generate_synthetic_image(prompt, width, height)
+        raise QualityError("The image service returned no usable image. Retry later.")
 
     def _generate_synthetic_image(self, prompt: str, width: int, height: int) -> str:
         out = self.cache_dir / f"synth_{uuid.uuid4().hex[:8]}.jpg"
@@ -1697,6 +1759,8 @@ class AudioEngine:
         pitch: str = "+0Hz",
         out_path: Optional[Path] = None,
         my_voice: bool = False,
+        strict_my_voice: bool = False,
+        delivery: str = "Natural",
     ) -> Tuple[Path, List[dict]]:
         """Synthesizes speech and returns (audio, word-boundary events).
 
@@ -1717,9 +1781,17 @@ class AudioEngine:
                 if quota_wait_seconds(reason):
                     reason = "today's free GPU time is used up"
                 self.voice_note = reason[:160]
+                if strict_my_voice:
+                    out.unlink(missing_ok=True)
+                    raise QualityError(
+                        f"Your saved voice could not be cloned: {reason[:160]}. "
+                        "Retry, select a standard voice explicitly, or record the complete narration in the live editor."
+                    ) from exc
                 log.warning("Cloned voice not used (%s); using the standard voice", reason[:200])
         lang_dict = TTS_VOICES.get(language, TTS_VOICES["English"])
         voice = lang_dict.get(gender, list(lang_dict.values())[0])
+        if rate == "+0%":
+            rate = {"Natural": "+0%", "Engaging": "+4%", "Calm": "-6%", "Energetic": "+10%"}.get(delivery, "+0%")
 
         events: List[dict] = []
 
@@ -1777,8 +1849,8 @@ class AudioEngine:
             tts.save(str(out_path))
         except Exception as exc:
             log.error("gTTS fallback failed: %s", exc)
-            # Last resort: short silence so the pipeline still produces a video
-            self._silence(out_path, 2.0)
+            out_path.unlink(missing_ok=True)
+            raise QualityError("Narration could not be generated. Check your connection and retry.") from exc
 
     def generate_synth_music(self, mood: str, duration: float, out_path: Path) -> Path:
         """Generates rich harmonic synth ambient background music without external assets."""
@@ -2035,9 +2107,9 @@ class SubtitleEngine:
         """
         style = SUBTITLE_STYLES.get(style_name, SUBTITLE_STYLES["Neon Glow"])
         force_style = (
-            f"Fontsize={style['FontSize']},PrimaryColour={style['PrimaryColour']},"
+            f"Fontname=Segoe UI,Fontsize=17,PrimaryColour={style['PrimaryColour']},"
             f"OutlineColour={style['OutlineColour']},BackColour={style['BackColour']},"
-            f"Outline={style['Outline']},Shadow={style['Shadow']},MarginV=28,Alignment=2"
+            "Outline=1.5,Shadow=0.5,MarginL=24,MarginR=24,MarginV=18,Alignment=2,WrapStyle=0"
         )
         srt_path = Path(srt_path).resolve()
         safe_name = srt_path.name
@@ -2047,7 +2119,7 @@ class SubtitleEngine:
         vf = f"subtitles={safe_name}:charenc=UTF-8:force_style='{force_style}'"
         run_ffmpeg(
             ["-i", str(Path(video_path).resolve()), "-vf", vf, "-map", "0:v:0", "-map", "0:a?",
-             "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(Path(out_path).resolve())],
+             "-c:a", "copy", *VIDEO_ENCODE_ARGS, str(Path(out_path).resolve())],
             cwd=srt_path.parent,
         )
         return out_path
@@ -2069,25 +2141,36 @@ class VideoEngine:
         motion_type: str = "zoom_in",
         out_path: Optional[Path] = None,
     ) -> Path:
-        """Applies dynamic Ken Burns 3D pan/zoom on static images using ffmpeg zoompan."""
+        """Animate a still with restrained motion over the full scene duration."""
         out = out_path or (DEFAULT_OUTPUT_DIR / f"kb_{uuid.uuid4().hex[:8]}.mp4")
-        total_frames = int(duration * fps)
+        if duration <= 0 or fps <= 0 or width < 2 or height < 2:
+            raise ValueError("Scene duration, frame rate and dimensions must be positive.")
+        total_frames = max(1, round(duration * fps))
+        # Use normalized time instead of per-frame increments: a long narration
+        # must not finish its zoom early and then hold still for the remaining scene.
+        phase = f"on/{max(1, total_frames - 1)}"
+        centered = "x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2'"
 
         if motion_type == "zoom_in":
-            zp = f"zoompan=z='min(zoom+0.0015,1.25)':d={total_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps}"
+            motion = f"z='1+0.08*{phase}':{centered}"
         elif motion_type == "zoom_out":
-            zp = f"zoompan=z='if(lte(zoom,1.0),1.25,max(1.0,zoom-0.0015))':d={total_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps}"
+            motion = f"z='1.08-0.08*{phase}':{centered}"
         elif motion_type == "pan_left":
-            zp = f"zoompan=z='1.15':d={total_frames}:x='if(lte(on,1),(iw-iw/zoom),max(0,x-1.5))':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps}"
-        else: # pan_right
-            zp = f"zoompan=z='1.15':d={total_frames}:x='if(lte(on,1),0,min(iw-iw/zoom,x+1.5))':y='ih/2-(ih/zoom/2)':s={width}x{height}:fps={fps}"
+            motion = f"z='1.08':x='(iw-iw/zoom)*(1-{phase})':y='(ih-ih/zoom)/2'"
+        elif motion_type == "pan_right":
+            motion = f"z='1.08':x='(iw-iw/zoom)*{phase}':y='(ih-ih/zoom)/2'"
+        else:
+            raise ValueError(f"Unknown camera motion: {motion_type}")
+        zp = f"zoompan={motion}:d={total_frames}:s={width}x{height}:fps={fps}"
 
-        vf = f"scale={width*2}:{height*2}:force_original_aspect_ratio=increase,crop={width*2}:{height*2},{zp},format=yuv420p"
+        # Reset pixel aspect ratio after the crop; otherwise portrait sources can
+        # produce stretched output despite the correct pixel dimensions.
+        vf = f"scale={width*2}:{height*2}:force_original_aspect_ratio=increase,crop={width*2}:{height*2},setsar=1,{zp},setsar=1,format=yuv420p"
         # One still frame in, `d` animated frames out. (With `-loop 1` the
         # image was re-fed at 25 fps and zoompan restarted per input frame;
         # only `-t` hid it, at the cost of decoding/scaling every extra frame.)
         run_ffmpeg(["-i", str(image_path), "-vf", vf, "-frames:v", str(max(total_frames, 1)),
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)])
+                    *VIDEO_ENCODE_ARGS, str(out)])
         return out
 
     @staticmethod
@@ -2144,14 +2227,22 @@ class VideoEngine:
 
         filter_str = ";".join(filter_parts)
         try:
-            run_ffmpeg([*inputs, "-filter_complex", filter_str, "-map", "[outv]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+            run_ffmpeg([*inputs, "-filter_complex", filter_str, "-map", "[outv]", "-r", str(fps),
+                        *VIDEO_ENCODE_ARGS, str(out_path)])
         except Exception as e:
             log.warning("xfade transition failed (%s), falling back to standard concat...", e)
             # Safe robust concat fallback
-            concat_parts = [f"[{i}:v]{norm}[cv{i}]" for i in range(len(video_clips))]
+            # Preserve scene start times even when xfade is unavailable. Dropping
+            # overlap without trimming would drift every later narration/caption.
+            concat_parts = []
+            for i, clip in enumerate(video_clips):
+                trim = (f",trim=duration={max(0.1, ffprobe_duration(clip) - crossfade):.6f}"
+                        if i < len(video_clips) - 1 else "")
+                concat_parts.append(f"[{i}:v]{norm}{trim},setpts=PTS-STARTPTS[cv{i}]")
             join_str = "".join(f"[cv{i}]" for i in range(len(video_clips))) + f"concat=n={len(video_clips)}:v=1:a=0[outv]"
             filter_fallback = ";".join(concat_parts) + ";" + join_str
-            run_ffmpeg([*inputs, "-filter_complex", filter_fallback, "-map", "[outv]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+            run_ffmpeg([*inputs, "-filter_complex", filter_fallback, "-map", "[outv]", "-r", str(fps),
+                        *VIDEO_ENCODE_ARGS, str(out_path)])
 
         return out_path
 
@@ -2167,7 +2258,7 @@ class VideoEngine:
         run_ffmpeg([
             "-i", str(video_path),
             "-vf", f"tpad=stop_mode=clone:stop_duration={pad:.2f}",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", str(out_path),
+            *VIDEO_ENCODE_ARGS, "-preset", "veryfast", str(out_path),
         ])
         return out_path
 
@@ -2217,7 +2308,7 @@ class VideoEngine:
     def interpolate_motion_60fps(video_path: Path, out_path: Path) -> Path:
         """Silky smooth 60fps motion interpolation via ffmpeg minterpolate."""
         vf = "minterpolate='fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'"
-        run_ffmpeg(["-i", str(video_path), "-vf", vf, "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+        run_ffmpeg(["-i", str(video_path), "-vf", vf, "-c:a", "copy", *VIDEO_ENCODE_ARGS, str(out_path)])
         return out_path
 
     UPSCALE_SHORT_EDGE = {"720p": 720, "1080p": 1080, "4K": 2160}
@@ -2252,9 +2343,9 @@ class VideoEngine:
             scale_filter = (f"scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,"
                             f"crop={tw}:{th},setsar=1")
 
-        vf = f"{scale_filter},unsharp=5:5:0.8:5:5:0.0"
+        vf = scale_filter  # Preserve source texture; aggressive sharpening creates halos.
         run_ffmpeg(["-i", str(video_path), "-vf", vf, "-map", "0:v:0", "-map", "0:a?",
-                    "-c:a", "copy", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out_path)])
+                    "-c:a", "copy", *VIDEO_ENCODE_ARGS, str(out_path)])
         return out_path
 
 
@@ -2291,6 +2382,7 @@ class JobSettings:
     mode: str = "ai_video"                     # 'ai_video' or 'script_story'
     prompt: str = ""
     script_text: str = ""
+    scene_count: int = 4
     negative_prompt: str = ""
     style_preset: str = "Cinematic"
     quality: str = "1080p"
@@ -2301,6 +2393,7 @@ class JobSettings:
     voice_gender: str = "Male"
     use_my_voice: bool = False                 # narrate with the saved voice sample
     voice_script: str = ""
+    narration_delivery: str = "Engaging"
     music_mood: str = "Ambient"
     subtitles_enabled: bool = True
     subtitle_style: str = "Neon Glow"
@@ -2643,6 +2736,8 @@ class JobQueue:
                 pending_job.message = f"⏳ {quota.reason} — auto-retry at {at} (checkpoints saved)"
                 pending_job.error = None
                 self._save(force=True)
+            except QualityError as exc:
+                self._fail(pending_job, str(exc))
             except Exception as e:
                 if self.is_cancelled(pending_job.job_id):
                     log.info("Job [%s] stopped — cancelled by user.", pending_job.job_id)
@@ -2769,13 +2864,72 @@ class VideoStudio:
         note = self.audio_engine.voice_note if sett.use_my_voice else ""
         return f" Your own voice was not used: {note}." if note else ""
 
+    @staticmethod
+    def _publish_video(source: Path, destination: Path, settings: JobSettings,
+                       job_dir: Path, voice_note: str = "") -> None:
+        """Validate the export, write its report, and publish an atomic, seekable MP4."""
+        duration = ffprobe_duration(source)
+        size = probe_video_size(source)
+        if duration <= 0.5 or not size:
+            raise QualityError("The final video could not be validated. Retry the render.")
+        sources = []
+        for metadata in sorted(job_dir.glob("*.asset.json")):
+            try:
+                sources.append(json.loads(metadata.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                sources.append({"scene": metadata.stem, "source": "unknown (older checkpoint)"})
+        report = {
+            "job_id": settings.job_id,
+            "mode": settings.mode,
+            "prompt": settings.prompt,
+            "duration_seconds": duration,
+            "export_width": size[0],
+            "export_height": size[1],
+            "style": settings.style_preset,
+            "language": settings.language,
+            "voice_note": voice_note,
+            "subtitles_requested": settings.subtitles_enabled,
+            "subtitles_burned_in": source.name in ("with_subs.mp4", "burned.mp4"),
+            "sources": sources,
+            "notes": [
+                "Export size is not native source resolution; scaling cannot recover missing detail.",
+                "AI visuals are illustrations. Generated narration requires factual review.",
+            ],
+        }
+        if settings.subtitles_enabled and not report["subtitles_burned_in"]:
+            report["notes"].append("Subtitles were not burned in. Use the companion SRT file.")
+        report_path = job_dir / "render_report.json"
+        report_tmp = report_path.with_suffix(".json.part")
+        report_tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report_tmp.replace(report_path)
+        temp_video = destination.with_name(destination.stem + ".publishing.mp4")
+        try:
+            run_ffmpeg(["-i", str(source), "-map", "0:v:0", "-map", "0:a?", "-c", "copy",
+                        "-movflags", "+faststart", str(temp_video)])
+            temp_video.replace(destination)
+        finally:
+            temp_video.unlink(missing_ok=True)
+
     def _execute_ai_diffusion_mode(self, sett: JobSettings, job_dir: Path, out_mp4: Path, progress_cb: Callable):
         if self.queue.is_cancelled(sett.job_id):
             return
 
         # 1. Prompt Enhancement
         progress_cb(sett.job_id, Stage.ENHANCING, 0.10, "Enhancing prompt with cinematic AI...")
-        enhanced_prompt = FreeLLMPromptEnhancer.expand_with_ai(sett.prompt, sett.style_preset, self.config)
+        plan_path = job_dir / "generation_plan.json"
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            enhanced_prompt = plan["enhanced_prompt"]
+            base_seed = int(plan["seed"])
+            if not isinstance(enhanced_prompt, str) or not enhanced_prompt.strip():
+                raise ValueError("Empty saved prompt")
+        except (OSError, ValueError, KeyError, TypeError):
+            enhanced_prompt = FreeLLMPromptEnhancer.expand_with_ai(sett.prompt, sett.style_preset, self.config)
+            base_seed = sett.seed if sett.seed >= 0 else random.randint(1, 999999)
+            plan_tmp = plan_path.with_suffix(".json.part")
+            plan_tmp.write_text(json.dumps({"enhanced_prompt": enhanced_prompt, "seed": base_seed},
+                                           ensure_ascii=False, indent=2), encoding="utf-8")
+            plan_tmp.replace(plan_path)
         neg_prompt = PromptEngine.negative(sett.negative_prompt)
 
         if self.queue.is_cancelled(sett.job_id):
@@ -2787,6 +2941,7 @@ class VideoStudio:
         clips: List[Path] = []
         last_frame_path: Optional[str] = None
         backend_used = "unknown"
+        used_backends: set[str] = set()
         used_token_fallback = False
         fallback_asset: Optional[Tuple[str, str]] = None
         # Generate at the models' native 16 fps and derive frame COUNT from the
@@ -2794,9 +2949,9 @@ class VideoStudio:
         # every clip came out a fixed (often wrong) length regardless of the
         # duration slider. Interpolation to 60 fps happens later in post.
         gen_fps = WAN_NATIVE_FPS
-        base_seed = sett.seed if sett.seed >= 0 else random.randint(1, 999999)
 
         for idx in range(total_chunks):
+            media_type = "AI video"
             if self.queue.is_cancelled(sett.job_id):
                 log.info("Job [%s] cancelled by user.", sett.job_id)
                 return
@@ -2808,6 +2963,11 @@ class VideoStudio:
             if clip_out.exists() and ffprobe_duration(clip_out) > 0.5:
                 log.info("Checkpoint: Reusing existing clip %s (no re-generation needed)", clip_out.name)
                 clips.append(clip_out)
+                try:
+                    metadata = json.loads((job_dir / f"chunk_{idx:02d}.asset.json").read_text(encoding="utf-8"))
+                    used_backends.add(metadata["backend"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    used_backends.add("unknown (older checkpoint)")
                 if last_frame.exists():
                     last_frame_path = str(last_frame)
                 continue
@@ -2890,7 +3050,7 @@ class VideoStudio:
                 )
 
             if not success:
-                # Intelligent visual asset & Ken Burns 3D motion synthesis fallback
+                # Stock footage or animated still fallback
                 log.info("Engaging cinematic visual synthesis fallback for chunk %d...", idx)
                 chunk_dur = chunk_secs     # match the AI chunk length so total duration is right
                 # Search with the user's own words: stock sites and Wikimedia
@@ -2909,7 +3069,7 @@ class VideoStudio:
                         "-stream_loop", "-1", "-i", asset_path,
                         "-t", str(chunk_dur),
                         "-vf", f"scale={req.width}:{req.height}:force_original_aspect_ratio=increase,crop={req.width}:{req.height}",
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip_out)
+                        *VIDEO_ENCODE_ARGS, str(clip_out)
                     ])
                 backend_used = "cinematic_synthesis"
                 success = True
@@ -2920,6 +3080,15 @@ class VideoStudio:
                 except FFmpegError as exc:
                     log.warning("Clip conform skipped for chunk %d: %s", idx, exc)
 
+            used_backends.add(backend_used)
+            asset_record = {
+                "chunk": idx + 1, "backend": backend_used, "seed": req.seed,
+                "visual_type": media_type if backend_used == "cinematic_synthesis" else "AI video",
+                "source_file": fallback_asset[0] if backend_used == "cinematic_synthesis" and fallback_asset else None,
+            }
+            (job_dir / f"chunk_{idx:02d}.asset.json").write_text(
+                json.dumps(asset_record, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             clips.append(clip_out)
 
             # Extract last frame for continuous image-to-video chaining. Optional:
@@ -2974,9 +3143,12 @@ class VideoStudio:
         events: List[dict] = []
         if vo_text:     # no narration typed -> music only (the prompt is not read aloud)
             vo_file, events = self.audio_engine.generate_voiceover(
-                vo_text, sett.language, sett.voice_gender, my_voice=sett.use_my_voice)
+                vo_text, sett.language, sett.voice_gender, my_voice=sett.use_my_voice,
+                strict_my_voice=True, delivery=sett.narration_delivery)
         video_dur = ffprobe_duration(current_vid)
         vo_dur = ffprobe_duration(vo_file) if vo_file and Path(vo_file).exists() else 0.0
+        if vo_text and vo_dur <= 0:
+            raise QualityError("The narration service returned unusable audio. Retry the render.")
         if vo_text and not events:
             events = estimate_word_events(vo_text, vo_dur)
         # If the narration runs longer than the footage, hold the last frame so
@@ -3014,26 +3186,28 @@ class VideoStudio:
             except Exception as e:
                 log.warning("Subtitle burning fallback: %s", e)
 
-        shutil.copyfile(current_vid, out_mp4)
+        self._publish_video(current_vid, out_mp4, sett, job_dir, self._voice_note(sett))
 
         # Generate Thumbnail
         thumb = job_dir / "thumb.jpg"
         run_ffmpeg(["-ss", "0.5", "-i", str(out_mp4), "-vframes", "1", "-q:v", "2", str(thumb)])
 
         if used_token_fallback:
-            done_msg = ("Made from pictures with camera motion, because the free AI video quota "
+            done_msg = ("Includes stock footage or animated stills, because the free AI video quota "
                         "needs a free Hugging Face token. Add one in Settings for real AI video.")
-        elif backend_used == "cinematic_synthesis":
-            done_msg = "Made from pictures with camera motion (the free AI video services were unavailable)."
+        elif "cinematic_synthesis" in used_backends:
+            done_msg = "Includes stock footage or animated stills because AI video services were unavailable. See the render report."
         else:
             done_msg = "Video generated successfully!"
         done_msg += self._voice_note(sett)
+        if sett.subtitles_enabled and events and current_vid.name != "with_subs.mp4":
+            done_msg += " Captions could not be burned in; download the SRT file."
         progress_cb(
             sett.job_id, Stage.DONE, 1.0, done_msg,
             video_path=str(out_mp4),
             srt_path=str(srt_file),
             thumbnail_path=str(thumb),
-            backend_used=backend_used,
+            backend_used=", ".join(sorted(used_backends)),
         )
 
     def _execute_script_mode(self, sett: JobSettings, job_dir: Path, out_mp4: Path, progress_cb: Callable):
@@ -3044,7 +3218,7 @@ class VideoStudio:
         progress_cb(sett.job_id, Stage.ENHANCING, 0.10, "Parsing multi-scene script...")
         script = sett.script_text.strip()
         if not script:
-            script = FreeLLMPromptEnhancer.generate_script(sett.prompt, 4, sett.language, self.config)
+            script = FreeLLMPromptEnhancer.generate_script(sett.prompt, sett.scene_count, sett.language, self.config)
 
         scenes = self._parse_script_scenes(script)
         if not scenes:
@@ -3104,10 +3278,13 @@ class VideoStudio:
 
             # Audio VO for scene
             vo_path_gen, events = self.audio_engine.generate_voiceover(
-                vo_prompt, sett.language, sett.voice_gender, my_voice=sett.use_my_voice)
+                vo_prompt, sett.language, sett.voice_gender, my_voice=sett.use_my_voice,
+                strict_my_voice=True, delivery=sett.narration_delivery)
             if vo_path_gen.exists():
                 shutil.copyfile(vo_path_gen, vo_path)
             vo_dur = ffprobe_duration(vo_path)
+            if vo_dur <= 0:
+                raise QualityError(f"Scene {s_idx + 1} has no usable narration. Retry the render.")
             scene_dur = scene_video_seconds(vo_dur)
             if not events:
                 events = estimate_word_events(vo_prompt, vo_dur)
@@ -3123,19 +3300,24 @@ class VideoStudio:
 
             # Fetch visual asset
             asset_path, media_type = self.media_fetcher.fetch_scene_visual(
-                vis_prompt, w, h, prefer_video=True, style=sett.style_preset, previous=previous_asset)
+                vis_prompt, w, h, prefer_video=True, style=sett.style_preset)
+            reused_previous = previous_asset == (asset_path, media_type)
             previous_asset = (asset_path, media_type)
+            (job_dir / f"scene_{s_idx:02d}.asset.json").write_text(json.dumps({
+                "scene": s_idx + 1, "visual_prompt": vis_prompt,
+                "visual_type": media_type, "source_file": asset_path, "reused_previous": reused_previous,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
 
             # Build Scene Video
             if media_type == "image":
-                motion = random.choice(["zoom_in", "zoom_out", "pan_left", "pan_right"])
+                motion = ["zoom_in", "pan_right", "zoom_out", "pan_left"][s_idx % 4]
                 self.video_engine.image_to_video_ken_burns(Path(asset_path), scene_dur, w, h, fps=sett.fps, motion_type=motion, out_path=scene_video)
             else: # video
                 run_ffmpeg([
                     "-stream_loop", "-1", "-i", asset_path,
                     "-t", str(scene_dur),
                     "-vf", f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}",
-                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(scene_video)
+                    *VIDEO_ENCODE_ARGS, str(scene_video)
                 ])
 
             actual_scene_duration = ffprobe_duration(scene_video)
@@ -3196,13 +3378,15 @@ class VideoStudio:
                 # Same policy as AI mode: keep the narrated video, ship the .srt.
                 log.warning("Subtitle burning skipped: %s", e)
 
-        shutil.copyfile(current_vid, out_mp4)
+        self._publish_video(current_vid, out_mp4, sett, job_dir, self._voice_note(sett))
 
         thumb = job_dir / "thumb.jpg"
         run_ffmpeg(["-ss", "0.5", "-i", str(out_mp4), "-vframes", "1", "-q:v", "2", str(thumb)])
 
+        subtitle_note = (" Captions could not be burned in; download the SRT file."
+                         if sett.subtitles_enabled and current_vid.name != "burned.mp4" else "")
         progress_cb(
-            sett.job_id, Stage.DONE, 1.0, "Storyboard video generated successfully!" + self._voice_note(sett),
+            sett.job_id, Stage.DONE, 1.0, "Storyboard video generated successfully!" + self._voice_note(sett) + subtitle_note,
             video_path=str(out_mp4),
             srt_path=str(srt_file),
             thumbnail_path=str(thumb),

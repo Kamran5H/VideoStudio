@@ -29,6 +29,11 @@ class VideoStudioCoreTests(unittest.TestCase):
     def tearDownClass(cls):
         app.STUDIO.queue.shutdown()
 
+    def test_story_scene_count_survives_submission_settings(self):
+        settings = app.build_story_settings("Oceans", "", "9:16", "English", "Female",
+                                            "None", True, "Documentary", scenes=6)
+        self.assertEqual(settings.scene_count, 6)
+
     # ------------------------------------------------------------ pipeline basics
     def test_frames_are_snapped_to_model_requirement(self):
         self.assertEqual(frames_for(0), 17)

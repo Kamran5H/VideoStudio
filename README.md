@@ -23,9 +23,9 @@
 
 **🎙️ My voice (optional):** record 10 to 20 seconds of yourself, press **Save my voice**, then pick **Voice → My voice** under *More options* and the narrator sounds like you. It is a close likeness, not a perfect copy. It works in English, Hindi, Arabic, Spanish, French, German, Chinese and Japanese (the free cloning model has no Urdu or Punjabi yet; those use the standard voices), and it needs the same free Hugging Face token as AI video. If it cannot be used, the video is still made with the standard voice and the result card says why.
 
-Voice language, music, subtitles, quality and visual style are under **More options**. API keys are optional and go in **⚙️ Settings**. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
+Voice language, music, subtitles, quality and visual style are under **More options**. Finished videos include downloadable SRT captions and a JSON render report showing the selected assets and export dimensions. API keys are optional and go in **⚙️ Settings**. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
 
-> **Everything here is free, but real AI video needs one free thing:** a Hugging Face account token. Hugging Face refuses GPU jobs from visitors who are not signed in, so without a token **Quick clip** makes its video from AI pictures with camera motion instead (and tells you so). Create a free account at huggingface.co, open *Settings → Access Tokens*, make a **Read** token and paste it into **⚙️ Settings**. A free account gets a few minutes of GPU time per day, which is a handful of 5-second clips.
+> **The studio uses local processing and hosted services; provider availability and account limits apply. Real AI video needs:** a Hugging Face account token. Hugging Face refuses GPU jobs from visitors who are not signed in, so without a token **Quick clip** makes its video from AI pictures with camera motion instead (and tells you so). Create a free account at huggingface.co, open *Settings → Access Tokens*, make a **Read** token and paste it into **⚙️ Settings**. A free account gets a few minutes of GPU time per day, which is a handful of 5-second clips.
 
 ## What happens behind the button
 
@@ -47,13 +47,24 @@ VideoStudio runs on your computer, but the heavy diffusion work is sent to free 
 
 **Voice cloning** uses the free `ResembleAI/Chatterbox-Multilingual-TTS` Space. Narration is sent in pieces of up to 280 characters (the Space cuts anything past 300) and joined with FFmpeg. Each piece costs about a minute of the free daily GPU time. Your recording is stored only in `outputs/voices/` and is uploaded to that Space while a video is being made.
 
-**📖 Story video** (script-to-video). You write `Visual:` / `VO:` lines, or have them drafted for you (Gemini if you set a key, otherwise a free Pollinations text model, otherwise an offline template). Each scene gets:
+**📖 Story video** (script-to-video). You write `Visual:` / `VO:` lines, or have them drafted for you (Gemini if you set a key, otherwise a free Pollinations text model, otherwise a clear error asking you to paste a script). Each scene gets:
 - a stock clip from Pexels or Pixabay, or a still image from Wikimedia or Pollinations, animated with Ken Burns motion
 - its own narration
 
 Narration and subtitles are timed to each scene's on-screen slot, so they stay in sync across crossfades.
 
 > **Honest resolution note:** the free models generate at about 480p–720p. Higher quality tiers are **upscaled**, not native 4K.
+
+## Output quality and service failures
+
+- Prompts preserve the described subject, setting, action and time of day. Style presets apply a visual treatment without inserting unrelated scenery.
+- Stock selection prefers fresh shots and suitable framing. Downloads are cached by source and rendition to avoid fetching the same file again.
+- Still images use gentle pans and zooms spread over the scene duration. Crossfade failures retain the scene timeline so later narration stays aligned.
+- H.264 exports use CRF 18 and fast-start MP4 packaging. Upscaling uses Lanczos without aggressive sharpening; it does not create native detail.
+- A missing visual never becomes a text placeholder. If both speech services fail, narration does not become silence. The job stops with a useful error and can be retried after the cause is resolved.
+- Script generation requires complete, distinct scene pairs in the requested count. When services are unavailable, paste your own script; the studio does not replace it with generic narration or an English template for another language.
+- AI scripts are drafts, and generated imagery is illustrative. Review narration and verify factual claims before publishing. Stock search results also need editorial review for relevance.
+- The render report is saved beside job checkpoints as `outputs/jobs/<job_id>/render_report.json`. It records source files, scene/chunk types, export dimensions and duration. Older checkpoints may have incomplete source records.
 
 ## Requirements
 

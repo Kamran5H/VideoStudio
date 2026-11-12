@@ -4,6 +4,7 @@ FFmpeg-backed tests run only when an ffmpeg binary is available
 (system PATH or the imageio-ffmpeg wheel from requirements.txt).
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -57,11 +58,11 @@ class ScriptParserTests(unittest.TestCase):
         )
         self.assertEqual(scenes, [("forest at dawn", "Light returns to the valley."), ("river", "river")])
 
-    def test_generated_fallback_script_parses_into_scenes(self):
+    def test_offline_script_writer_does_not_substitute_generic_filler(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), patch("requests.get", side_effect=OSError("offline")):
-            script = vs.FreeLLMPromptEnhancer.generate_script("Oceans", 4, "English",
-                                                               vs.StudioConfig(gemini_api_key=""))
-        self.assertEqual(len(self.studio._parse_script_scenes(script)), 4)
+            with self.assertRaisesRegex(vs.QualityError, "Paste a script in English"):
+                vs.FreeLLMPromptEnhancer.generate_script("Oceans", 4, "English",
+                                                        vs.StudioConfig(gemini_api_key=""))
 
 
 class PureHelperTests(unittest.TestCase):
@@ -236,6 +237,20 @@ class JobQueueRobustnessTests(unittest.TestCase):
             q._jobs["x"] = vs.JobStatus(job_id="x", settings=None)
             self._run_once(q)
             self.assertEqual(q._jobs["x"].stage, vs.Stage.FAILED)
+
+    def test_missing_required_asset_fails_without_automatic_retry(self):
+        class Studio:
+            config = vs.StudioConfig()
+
+            def execute_job(self, *a):
+                raise vs.QualityError("No usable visual was found")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            q = _bare_queue(tmp, Studio())
+            q._jobs["x"] = vs.JobStatus(job_id="x", settings=vs.JobSettings(job_id="x"))
+            self._run_once(q)
+            self.assertEqual(q._jobs["x"].stage, vs.Stage.FAILED)
+            self.assertEqual(q._jobs["x"].retries, 0)
 
     def test_pipeline_returning_without_result_is_failed(self):
         class Studio:
@@ -506,9 +521,8 @@ class CaptionAndVisualFallbackTests(unittest.TestCase):
                     patch.object(fetcher, "_generate_pollinations_image", return_value=None):
                 self.assertEqual(fetcher.fetch_scene_visual("salt crystals", previous=(str(prev), "image")),
                                  (str(prev), "image"))
-                made, kind = fetcher.fetch_scene_visual("salt crystals")
-            self.assertEqual(kind, "image")
-            self.assertNotIn("test_diag", made)
+                with self.assertRaises(vs.QualityError):
+                    fetcher.fetch_scene_visual("salt crystals")
 
     def test_pollinations_retries_and_does_not_style_a_styled_prompt_twice(self):
         fetcher = vs.MediaFetcher(vs.StudioConfig())
@@ -523,7 +537,7 @@ class CaptionAndVisualFallbackTests(unittest.TestCase):
                 patch.object(vs.MediaFetcher, "_download", side_effect=fake_download):
             self.assertTrue(fetcher._generate_pollinations_image(styled, 832, 480, "Cinematic"))
         self.assertEqual(len(urls), 2)
-        self.assertEqual(urls[0].count("Cinematic%2035mm%20film%20still"), 1)
+        self.assertEqual(urls[0].count("Visual%20treatment%3A"), 1)
 
 
 class VoiceCloningTests(unittest.TestCase):
@@ -617,14 +631,13 @@ class VoiceCloningTests(unittest.TestCase):
 
 
 class ScriptWriterTests(unittest.TestCase):
-    def test_offline_template_honours_scene_count(self):
-        studio = object.__new__(vs.VideoStudio)
+    def test_offline_writer_reports_the_requested_language(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), \
                 patch("requests.get", side_effect=OSError("offline")):
-            for count in (1, 2, 3, 6):
-                script = vs.FreeLLMPromptEnhancer.generate_script("Oceans", count, "English",
-                                                                   vs.StudioConfig(gemini_api_key=""))
-                self.assertEqual(len(studio._parse_script_scenes(script)), count)
+            for language in ("English", "Urdu", "Arabic"):
+                with self.assertRaisesRegex(vs.QualityError, f"Paste a script in {language}"):
+                    vs.FreeLLMPromptEnhancer.generate_script("Oceans", 3, language,
+                                                            vs.StudioConfig(gemini_api_key=""))
 
     def test_free_text_model_writes_the_script_when_there_is_no_gemini_key(self):
         class Resp:
@@ -746,6 +759,34 @@ class FFmpegPipelineTests(unittest.TestCase):
         vs.VideoEngine.crossfade_concat([a, b], out, crossfade=0.3)
         self.assertEqual(vs.probe_video_size(out), (832, 480))
         self.assertGreater(vs.ffprobe_duration(out), 1.8)
+
+    def test_failed_crossfade_keeps_original_scene_timing(self):
+        a = self._clip("a.mp4", 320, 180, dur=1.5)
+        b = self._clip("b.mp4", 320, 180, dur=1.5)
+        out = self.tmp / "fallback.mp4"
+        real_run = vs.run_ffmpeg
+
+        def fail_xfade(args, **kwargs):
+            if any("xfade=" in str(arg) for arg in args):
+                raise vs.FFmpegError("forced xfade failure")
+            real_run(args, **kwargs)
+
+        with patch.object(vs, "run_ffmpeg", side_effect=fail_xfade):
+            vs.VideoEngine.crossfade_concat([a, b], out, crossfade=0.4, fps=30)
+        self.assertAlmostEqual(vs.ffprobe_duration(out), 2.6, delta=0.08)
+
+    def test_publication_writes_playable_export_and_source_report(self):
+        source = self._clip("source.mp4", 320, 180)
+        (self.tmp / "scene_00.asset.json").write_text(
+            json.dumps({"visual_type": "video", "source_file": str(source)}), encoding="utf-8"
+        )
+        output = self.tmp / "published.mp4"
+        vs.VideoStudio._publish_video(source, output, vs.JobSettings(prompt="Ocean"), self.tmp)
+        report = json.loads((self.tmp / "render_report.json").read_text(encoding="utf-8"))
+        self.assertEqual((report["export_width"], report["export_height"]), (320, 180))
+        self.assertEqual(report["sources"][0]["source_file"], str(source))
+        self.assertGreater(vs.ffprobe_duration(output), 1)
+        self.assertFalse((self.tmp / "published.publishing.mp4").exists())
 
     def test_upscale_gives_exact_standard_frames(self):
         for (w, h), aspect, want in (((832, 480), "16:9", (1920, 1080)), ((480, 832), "9:16", (1080, 1920)),
