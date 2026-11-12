@@ -1534,12 +1534,159 @@ TTS_VOICES: dict[str, dict[str, str]] = {
 
 MUSIC_MOODS = ["Ambient", "Uplifting", "Dramatic", "Calm", "Energetic", "None"]
 
+VOICES_DIR = DEFAULT_OUTPUT_DIR / "voices"
+MY_VOICE_PATH = VOICES_DIR / "my_voice.wav"
+
+# Languages the free cloning model speaks (Chatterbox Multilingual, 23 in all).
+# Urdu and Punjabi are not among them, so those keep the standard voices.
+CLONE_LANG_CODES: dict[str, str] = {
+    "English": "en", "Hindi": "hi", "Arabic": "ar", "Spanish": "es",
+    "French": "fr", "German": "de", "Chinese": "zh", "Japanese": "ja",
+}
+
+
+def split_for_cloning(text: str, limit: int = 280) -> List[str]:
+    """Split narration into pieces the cloning Space accepts (it silently cuts
+    anything past 300 characters), breaking at sentence ends where possible."""
+    pieces: List[str] = []
+    current = ""
+    for sentence in re.split(r"(?<=[.!?。！？۔،,;:])\s+", " ".join((text or "").split())):
+        while len(sentence) > limit:                      # one very long sentence
+            cut = sentence.rfind(" ", 0, limit)
+            cut = cut if cut > limit // 2 else limit
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if not sentence:
+            continue
+        if current and len(current) + 1 + len(sentence) > limit:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+class VoiceCloner:
+    """Speak narration in the user's own voice from a short recording.
+
+    Uses the free ResembleAI Chatterbox Multilingual Space (zero-shot cloning).
+    Per its app.py: generate_tts_audio(text_input, language_id,
+    audio_prompt_path_input, exaggeration_input, temperature_input,
+    seed_num_input, cfgw_input), at most 300 characters and about one minute
+    of ZeroGPU time per call. It needs the same free Hugging Face token as the
+    video engines.
+    """
+    SPACE = "ResembleAI/Chatterbox-Multilingual-TTS"
+    API = "/generate_tts_audio"
+    MIN_SAMPLE_SECONDS = 5.0
+    MAX_SAMPLE_SECONDS = 30.0
+
+    def __init__(self, config: Optional[StudioConfig] = None, sample_path: Path = MY_VOICE_PATH):
+        self.config = config or StudioConfig()
+        self.sample_path = Path(sample_path)
+        self._client: Any = None
+
+    def has_sample(self) -> bool:
+        return self.sample_path.is_file() and self.sample_path.stat().st_size > 1000
+
+    def save_sample(self, source: Path) -> float:
+        """Store a recording as the voice sample (mono WAV, quiet edges cut,
+        at most 30 s). Returns its length; raises ValueError if unusable."""
+        source = Path(source)
+        if not source.is_file():
+            raise ValueError("No recording was received.")
+        self.sample_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.sample_path.with_name("my_voice_new.wav")
+        try:
+            run_ffmpeg([
+                "-i", str(source), "-vn", "-ac", "1", "-ar", "24000",
+                # dynaudnorm, not loudnorm: silenceremove feeding loudnorm
+                # deadlocks ffmpeg on short clean recordings.
+                "-af", "silenceremove=start_periods=1:start_threshold=-45dB,dynaudnorm",
+                "-t", f"{self.MAX_SAMPLE_SECONDS}", str(tmp),
+            ], timeout=60)
+        except FFmpegError as exc:
+            tmp.unlink(missing_ok=True)
+            raise ValueError("That file could not be read as audio.") from exc
+        seconds = ffprobe_duration(tmp)
+        if seconds < self.MIN_SAMPLE_SECONDS:
+            tmp.unlink(missing_ok=True)
+            raise ValueError(f"The recording is too short ({seconds:.0f}s). Speak for 10 to 20 seconds.")
+        tmp.replace(self.sample_path)
+        return seconds
+
+    def delete_sample(self) -> None:
+        self.sample_path.unlink(missing_ok=True)
+
+    def unavailable_reason(self, language: str) -> str:
+        """Why cloning cannot be used right now ('' when it can)."""
+        if not self.has_sample():
+            return "no voice sample is saved yet (see the My voice tab)"
+        if language not in CLONE_LANG_CODES:
+            return f"voice cloning does not support {language} yet"
+        if not self.config.hf_token.strip():
+            return "voice cloning needs the free Hugging Face token (see Settings)"
+        return ""
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self._client = hf_space_client(self.SPACE, self.config.hf_token)
+        return self._client
+
+    def synthesize(self, text: str, language: str, out_path: Path) -> Path:
+        """Narrate `text` in the saved voice. Raises on any failure so the
+        caller can fall back to a standard voice."""
+        reason = self.unavailable_reason(language)
+        if reason:
+            raise RuntimeError(reason)
+        from gradio_client import handle_file
+        client = self._get_client()
+        parts: List[Path] = []
+        work = out_path.with_suffix("")
+        try:
+            for i, piece in enumerate(split_for_cloning(text)):
+                result = GenerationBackend._predict(
+                    client,
+                    text_input=piece, language_id=CLONE_LANG_CODES[language],
+                    audio_prompt_path_input=handle_file(str(self.sample_path)),
+                    exaggeration_input=0.5, temperature_input=0.8, seed_num_input=0, cfgw_input=0.5,
+                    api_name=self.API, timeout=300,
+                )
+                produced = result[0] if isinstance(result, (list, tuple)) else result
+                if isinstance(produced, dict):
+                    produced = produced.get("path") or produced.get("url")
+                if not produced or not Path(str(produced)).is_file():
+                    raise RuntimeError(f"the voice service returned no audio: {str(result)[:120]}")
+                part = Path(f"{work}_part{i:02d}.wav")
+                shutil.copyfile(str(produced), part)
+                parts.append(part)
+            if not parts:
+                raise RuntimeError("there was no text to speak")
+            inputs: List[str] = []
+            for part in parts:
+                inputs.extend(["-i", str(part)])
+            joined = "".join(f"[{i}:a]" for i in range(len(parts)))
+            run_ffmpeg([*inputs, "-filter_complex", f"{joined}concat=n={len(parts)}:v=0:a=1[a]",
+                        "-map", "[a]", "-c:a", "libmp3lame", "-b:a", "192k", str(out_path)])
+            return out_path
+        finally:
+            for part in parts:
+                part.unlink(missing_ok=True)
+
+
 class AudioEngine:
     """Multilingual Neural TTS, Background Music Synthesis, and Sidechain Auto-Ducking."""
 
-    def __init__(self):
+    def __init__(self, config: Optional[StudioConfig] = None):
         self.temp_dir = DEFAULT_OUTPUT_DIR / "audio_temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.voice_cloner = VoiceCloner(config)
+        self.voice_note = ""        # why the cloned voice was not used, if it was asked for
 
     def generate_voiceover(
         self,
@@ -1549,9 +1696,28 @@ class AudioEngine:
         rate: str = "+0%",
         pitch: str = "+0Hz",
         out_path: Optional[Path] = None,
+        my_voice: bool = False,
     ) -> Tuple[Path, List[dict]]:
-        """Synthesizes speech using edge-tts and extracts word-boundary events."""
+        """Synthesizes speech and returns (audio, word-boundary events).
+
+        With ``my_voice`` the saved voice sample is cloned; that path returns
+        no word events (captions are then timed by estimate_word_events). If
+        cloning is not possible the standard voice is used and the reason is
+        kept in ``self.voice_note``.
+        """
         out = out_path or (self.temp_dir / f"vo_{uuid.uuid4().hex[:8]}.mp3")
+        if my_voice and text.strip():
+            try:
+                self.voice_cloner.synthesize(text, language, out)
+                if out.exists() and out.stat().st_size > 100:
+                    return out, []
+                raise RuntimeError("the voice service returned no audio")
+            except Exception as exc:
+                reason = str(exc)
+                if quota_wait_seconds(reason):
+                    reason = "today's free GPU time is used up"
+                self.voice_note = reason[:160]
+                log.warning("Cloned voice not used (%s); using the standard voice", reason[:200])
         lang_dict = TTS_VOICES.get(language, TTS_VOICES["English"])
         voice = lang_dict.get(gender, list(lang_dict.values())[0])
 
@@ -2133,6 +2299,7 @@ class JobSettings:
     fps: int = 30
     language: str = "English"
     voice_gender: str = "Male"
+    use_my_voice: bool = False                 # narrate with the saved voice sample
     voice_script: str = ""
     music_mood: str = "Ambient"
     subtitles_enabled: bool = True
@@ -2534,7 +2701,7 @@ class VideoStudio:
         self.config = config or StudioConfig.load()
         self.probe = HardwareProbe()
         self.prompt_engine = PromptEngine()
-        self.audio_engine = AudioEngine()
+        self.audio_engine = AudioEngine(self.config)
         self.media_fetcher = MediaFetcher(self.config)
         self.video_engine = VideoEngine()
         self.subtitle_engine = SubtitleEngine()
@@ -2589,11 +2756,18 @@ class VideoStudio:
         final_video_out.parent.mkdir(parents=True, exist_ok=True)
 
         log.info("Starting Job [%s] Mode: %s", sett.job_id, sett.mode)
+        self.audio_engine.voice_note = ""
 
         if sett.mode == "script_story":
             self._execute_script_mode(sett, job_dir, final_video_out, progress_cb)
         else:
             self._execute_ai_diffusion_mode(sett, job_dir, final_video_out, progress_cb)
+
+    def _voice_note(self, sett: JobSettings) -> str:
+        """Sentence for the result card when 'My voice' was asked for but a
+        standard voice had to be used."""
+        note = self.audio_engine.voice_note if sett.use_my_voice else ""
+        return f" Your own voice was not used: {note}." if note else ""
 
     def _execute_ai_diffusion_mode(self, sett: JobSettings, job_dir: Path, out_mp4: Path, progress_cb: Callable):
         if self.queue.is_cancelled(sett.job_id):
@@ -2799,7 +2973,8 @@ class VideoStudio:
         vo_file: Optional[Path] = None
         events: List[dict] = []
         if vo_text:     # no narration typed -> music only (the prompt is not read aloud)
-            vo_file, events = self.audio_engine.generate_voiceover(vo_text, sett.language, sett.voice_gender)
+            vo_file, events = self.audio_engine.generate_voiceover(
+                vo_text, sett.language, sett.voice_gender, my_voice=sett.use_my_voice)
         video_dur = ffprobe_duration(current_vid)
         vo_dur = ffprobe_duration(vo_file) if vo_file and Path(vo_file).exists() else 0.0
         if vo_text and not events:
@@ -2852,6 +3027,7 @@ class VideoStudio:
             done_msg = "Made from pictures with camera motion (the free AI video services were unavailable)."
         else:
             done_msg = "Video generated successfully!"
+        done_msg += self._voice_note(sett)
         progress_cb(
             sett.job_id, Stage.DONE, 1.0, done_msg,
             video_path=str(out_mp4),
@@ -2927,7 +3103,8 @@ class VideoStudio:
             progress_cb(sett.job_id, Stage.GENERATING, prog, f"Processing scene {s_idx+1}/{len(scenes)}...")
 
             # Audio VO for scene
-            vo_path_gen, events = self.audio_engine.generate_voiceover(vo_prompt, sett.language, sett.voice_gender)
+            vo_path_gen, events = self.audio_engine.generate_voiceover(
+                vo_prompt, sett.language, sett.voice_gender, my_voice=sett.use_my_voice)
             if vo_path_gen.exists():
                 shutil.copyfile(vo_path_gen, vo_path)
             vo_dur = ffprobe_duration(vo_path)
@@ -3025,7 +3202,7 @@ class VideoStudio:
         run_ffmpeg(["-ss", "0.5", "-i", str(out_mp4), "-vframes", "1", "-q:v", "2", str(thumb)])
 
         progress_cb(
-            sett.job_id, Stage.DONE, 1.0, "Storyboard video generated successfully!",
+            sett.job_id, Stage.DONE, 1.0, "Storyboard video generated successfully!" + self._voice_note(sett),
             video_path=str(out_mp4),
             srt_path=str(srt_file),
             thumbnail_path=str(thumb),

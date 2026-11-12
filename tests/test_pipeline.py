@@ -526,6 +526,96 @@ class CaptionAndVisualFallbackTests(unittest.TestCase):
         self.assertEqual(urls[0].count("Cinematic%2035mm%20film%20still"), 1)
 
 
+class VoiceCloningTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="vs_voice_"))
+        self.cloner = vs.VoiceCloner(vs.StudioConfig(hf_token="hf_x"), self.tmp / "voices" / "my_voice.wav")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _tone(self, name, seconds):
+        out = self.tmp / name
+        vs.run_ffmpeg(["-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}", str(out)])
+        return out
+
+    def test_long_narration_is_split_under_the_space_limit_without_losing_words(self):
+        text = " ".join(f"Sentence number {i} talks about the salty sea." for i in range(30))
+        pieces = vs.split_for_cloning(text)
+        self.assertGreater(len(pieces), 3)
+        self.assertTrue(all(0 < len(p) <= 280 for p in pieces))
+        self.assertEqual(" ".join(pieces).split(), text.split())
+        self.assertEqual(vs.split_for_cloning("x" * 700)[0], "x" * 280)
+        self.assertEqual(vs.split_for_cloning("  "), [])
+
+    def test_reasons_cloning_cannot_be_used_are_plain(self):
+        self.assertIn("no voice sample", self.cloner.unavailable_reason("English"))
+        self.cloner.sample_path.parent.mkdir(parents=True)
+        self.cloner.sample_path.write_bytes(b"x" * 2000)
+        self.assertEqual(self.cloner.unavailable_reason("English"), "")
+        self.assertIn("Urdu", self.cloner.unavailable_reason("Urdu"))
+        self.cloner.config.hf_token = ""
+        self.assertIn("Hugging Face token", self.cloner.unavailable_reason("English"))
+
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg not available")
+    def test_sample_is_saved_trimmed_and_short_ones_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "too short"):
+            self.cloner.save_sample(self._tone("short.wav", 2))
+        self.assertFalse(self.cloner.has_sample())
+        seconds = self.cloner.save_sample(self._tone("long.mp3", 40))
+        self.assertTrue(self.cloner.has_sample())
+        self.assertAlmostEqual(seconds, 30.0, delta=0.5)
+        junk = self.tmp / "junk.wav"
+        junk.write_bytes(b"not audio")
+        with self.assertRaisesRegex(ValueError, "could not be read"):
+            self.cloner.save_sample(junk)
+        self.assertTrue(self.cloner.has_sample())          # a bad upload keeps the old sample
+        self.cloner.delete_sample()
+        self.assertFalse(self.cloner.has_sample())
+
+    @unittest.skipUnless(HAS_FFMPEG, "ffmpeg not available")
+    def test_synthesize_sends_the_space_signature_and_joins_the_pieces(self):
+        self.cloner.save_sample(self._tone("me.wav", 8))
+        piece = self._tone("piece.wav", 1.0)
+        sent = []
+
+        class Client(FakeSpaceClient):
+            def submit(self, *args, api_name=None, **kwargs):
+                sent.append((api_name, kwargs))
+                return super().submit(*args, api_name=api_name, **kwargs)
+
+        self.cloner._client = Client("/generate_tts_audio", [], str(piece))
+        self.cloner._client.result = str(piece)
+        text = " ".join(f"Sentence number {i} talks about the salty sea." for i in range(12))
+        out = self.cloner.synthesize(text, "Hindi", self.tmp / "vo.mp3")
+        self.assertEqual(len(sent), len(vs.split_for_cloning(text)))
+        api, kwargs = sent[0]
+        self.assertEqual(api, "/generate_tts_audio")
+        self.assertEqual(set(kwargs), {"text_input", "language_id", "audio_prompt_path_input", "exaggeration_input",
+                                       "temperature_input", "seed_num_input", "cfgw_input"})
+        self.assertEqual(kwargs["language_id"], "hi")
+        self.assertAlmostEqual(vs.ffprobe_duration(out), 1.0 * len(sent), delta=0.4)
+        self.assertEqual(list(self.tmp.glob("vo_part*")), [])
+
+    def test_voiceover_falls_back_to_the_standard_voice_and_says_why(self):
+        engine = vs.AudioEngine(vs.StudioConfig(hf_token=""))
+        engine.voice_cloner = self.cloner               # no sample saved
+        out = self.tmp / "vo.mp3"
+
+        def fake_gtts(text, language, out_path):
+            Path(out_path).write_bytes(b"\0" * 500)
+
+        with patch("asyncio.run", side_effect=RuntimeError("offline")), \
+                patch.object(engine, "_gtts_fallback", side_effect=fake_gtts):
+            got, events = engine.generate_voiceover("Hello there.", "English", "Female", out_path=out, my_voice=True)
+        self.assertEqual((got, events), (out, []))
+        self.assertIn("no voice sample", engine.voice_note)
+        studio = object.__new__(vs.VideoStudio)
+        studio.audio_engine = engine
+        self.assertIn("Your own voice was not used", studio._voice_note(vs.JobSettings(use_my_voice=True)))
+        self.assertEqual(studio._voice_note(vs.JobSettings(use_my_voice=False)), "")
+
+
 class ScriptWriterTests(unittest.TestCase):
     def test_offline_template_honours_scene_count(self):
         studio = object.__new__(vs.VideoStudio)

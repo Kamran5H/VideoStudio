@@ -21,6 +21,8 @@
    **📖 Story video:** type a topic, press **Write the script for me** (or paste your own), then press **Make my video**.
 3. Watch the status card. When it says ✅ Completed, use the ⬇ button on the player to download.
 
+**🎙️ My voice (optional):** record 10 to 20 seconds of yourself, press **Save my voice**, then pick **Voice → My voice** under *More options* and the narrator sounds like you. It is a close likeness, not a perfect copy. It works in English, Hindi, Arabic, Spanish, French, German, Chinese and Japanese (the free cloning model has no Urdu or Punjabi yet; those use the standard voices), and it needs the same free Hugging Face token as AI video. If it cannot be used, the video is still made with the standard voice and the result card says why.
+
 Voice language, music, subtitles, quality and visual style are under **More options**. API keys are optional and go in **⚙️ Settings**. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
 
 > **Everything here is free, but real AI video needs one free thing:** a Hugging Face account token. Hugging Face refuses GPU jobs from visitors who are not signed in, so without a token **Quick clip** makes its video from AI pictures with camera motion instead (and tells you so). Create a free account at huggingface.co, open *Settings → Access Tokens*, make a **Read** token and paste it into **⚙️ Settings**. A free account gets a few minutes of GPU time per day, which is a handful of 5-second clips.
@@ -42,6 +44,8 @@ VideoStudio runs on your computer, but the heavy diffusion work is sent to free 
 3. **When free GPU quota runs out** and a token is saved, the job waits and resumes by itself. Finished chunks are checkpointed to disk, so nothing is re-generated. With no token (waiting would never help), or if every backend is genuinely down, the studio uses stock footage or an AI still image with **Ken Burns** motion instead.
 4. **Post-processing with FFmpeg:** crossfades and a Lanczos **upscale** to the exact standard frame: 1920x1080, 1080x1920 or 1080x1080 (and the 720p / 4K equivalents).
 5. **Audio:** if you typed narration, **Edge-TTS** speaks it (gTTS as fallback) in 10 languages with word-timed subtitles. Background music ducks under the voice. With no narration, the clip gets music only.
+
+**Voice cloning** uses the free `ResembleAI/Chatterbox-Multilingual-TTS` Space. Narration is sent in pieces of up to 280 characters (the Space cuts anything past 300) and joined with FFmpeg. Each piece costs about a minute of the free daily GPU time. Your recording is stored only in `outputs/voices/` and is uploaded to that Space while a video is being made.
 
 **📖 Story video** (script-to-video). You write `Visual:` / `VO:` lines, or have them drafted for you (Gemini if you set a key, otherwise a free Pollinations text model, otherwise an offline template). Each scene gets:
 - a stock clip from Pexels or Pixabay, or a still image from Wikimedia or Pollinations, animated with Ken Burns motion
@@ -103,7 +107,7 @@ Tests write to a temporary output folder, never your `outputs/`. `test_verify.py
 ## Repository layout
 
 ```text
-app.py                 Gradio UI: Quick clip, Story video, Settings
+app.py                 Gradio UI: Quick clip, Story video, My voice, Settings
 video_studio.py        Pipeline: backends, media fetch, TTS, subtitles, FFmpeg engine, job queue
 colab_worker.ipynb     Free Colab GPU worker exposing /generate for Wan2.1-T2V-1.3B
 tests/                 Offline unit and FFmpeg regression tests

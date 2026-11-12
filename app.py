@@ -24,6 +24,7 @@ import gradio as gr
 from gradio.themes import GoogleFont, Soft
 
 from video_studio import (
+    CLONE_LANG_CODES,
     DEFAULT_OUTPUT_DIR,
     MUSIC_MOODS,
     STYLE_PRESETS,
@@ -52,7 +53,8 @@ SHAPES = [
 SHAPE_VALUES = [v for _, v in SHAPES]
 QUALITIES = ["720p", "1080p", "4K"]
 LANGUAGES = list(TTS_VOICES.keys())
-VOICES = ["Female", "Male"]
+MY_VOICE = "My voice"
+VOICES = ["Female", "Male", MY_VOICE]
 STYLES = list(STYLE_PRESETS.keys())
 MUSIC = MUSIC_MOODS                        # includes "None"
 SUBTITLE_STYLE = "Classic White"
@@ -324,6 +326,11 @@ def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> t
 # ---------------------------------------------------------------------------
 
 
+def _standard_voice(voice: Any) -> str:
+    """The standard voice to use (also the backup when 'My voice' is chosen)."""
+    return voice if voice in ("Female", "Male") else "Female"
+
+
 def build_ai_settings(prompt, shape, seconds, narration, language, voice, music, subtitles,
                       quality, style) -> JobSettings:
     return JobSettings(
@@ -333,7 +340,8 @@ def build_ai_settings(prompt, shape, seconds, narration, language, voice, music,
         duration=_number(seconds, 5.0, *CLIP_SECONDS),
         voice_script=_text(narration, TEXT_LIMITS["narration"]),
         language=_choice(language, LANGUAGES, "English"),
-        voice_gender=_choice(voice, VOICES, "Female"),
+        voice_gender=_standard_voice(voice),
+        use_my_voice=(voice == MY_VOICE),
         music_mood=_choice(music, MUSIC, "Ambient"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -349,7 +357,8 @@ def build_story_settings(topic, script, shape, language, voice, music, subtitles
         script_text=_text(script, TEXT_LIMITS["script"]),
         aspect_ratio=_choice(shape, SHAPE_VALUES, "16:9"),
         language=_choice(language, LANGUAGES, "English"),
-        voice_gender=_choice(voice, VOICES, "Female"),
+        voice_gender=_standard_voice(voice),
+        use_my_voice=(voice == MY_VOICE),
         music_mood=_choice(music, MUSIC, "Calm"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -433,6 +442,53 @@ def stop_job(job_id: str) -> str:
     if not job_id:
         return "Nothing is running right now."
     return "⏹️ Stopping…" if STUDIO.queue.cancel(job_id) else "That video already finished."
+
+
+# ---------------------------------------------------------------------------
+# My voice (voice cloning)
+# ---------------------------------------------------------------------------
+
+VOICE_TEST_LINE = "Hello! This is my own voice, speaking from VideoStudio."
+
+
+def my_voice_status() -> str:
+    cloner = STUDIO.audio_engine.voice_cloner
+    if not cloner.has_sample():
+        return "⚪ No voice saved yet."
+    lines = [f"🟢 Your voice is saved. Choose **{MY_VOICE}** under *More options → Voice* when you make a video."]
+    if not STUDIO.config.hf_token.strip():
+        lines.append("⚠️ One more step: add the free Hugging Face token in **Settings** (voice cloning runs on the free GPUs).")
+    return "\n\n".join(lines)
+
+
+def save_my_voice(recording: Optional[str]) -> str:
+    if not recording:
+        return "✏️ Record or upload your voice first."
+    try:
+        seconds = STUDIO.audio_engine.voice_cloner.save_sample(Path(recording))
+    except ValueError as exc:
+        return f"❌ {exc}"
+    return f"✅ Saved {seconds:.0f} seconds of your voice.\n\n{my_voice_status()}"
+
+
+def delete_my_voice() -> str:
+    STUDIO.audio_engine.voice_cloner.delete_sample()
+    return "🗑️ Your voice sample was deleted from this computer."
+
+
+def test_my_voice(language: str):
+    cloner = STUDIO.audio_engine.voice_cloner
+    lang = _choice(language, list(CLONE_LANG_CODES), "English")
+    out = DEFAULT_OUTPUT_DIR / "audio_temp" / "my_voice_test.mp3"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cloner.synthesize(VOICE_TEST_LINE, lang, out)
+    except Exception as exc:
+        reason = redact_sensitive_text(str(exc))
+        if "ZeroGPU" in reason:
+            reason = "today's free GPU time is used up. Try again later"
+        return None, f"❌ Could not test: {reason[:200]}."
+    return str(out), "✅ This is how your videos will sound."
 
 
 def turn_off() -> str:
@@ -654,6 +710,38 @@ def build_app() -> gr.Blocks:
                     [story_status, story_card, story_video, story_job_id],
                 )
                 story_stop.click(stop_job, story_job_id, story_status)
+
+            # ---------------------------------------------------------- My voice
+            with gr.Tab("🎙️ My voice", id="voice"):
+                gr.Markdown(
+                    "Make the narrator sound like **you**. Free, and your recording stays on this computer "
+                    "(it is only sent to the free voice service while a video is being made).\n\n"
+                    "**1.** Record yourself reading anything for **10 to 20 seconds** in a quiet room "
+                    "(or upload a recording). **2.** Press **Save my voice**. "
+                    f"**3.** When making a video, open *More options* and choose **Voice → {MY_VOICE}**."
+                )
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=5):
+                        voice_rec = gr.Audio(sources=["microphone", "upload"], type="filepath",
+                                             label="Your voice (10 to 20 seconds)")
+                        with gr.Row():
+                            voice_save = gr.Button("💾 Save my voice", variant="primary", scale=3)
+                            voice_delete = gr.Button("🗑️ Delete", variant="secondary", scale=1)
+                        voice_msg = gr.Markdown(my_voice_status())
+                    with gr.Column(scale=5):
+                        voice_test_lang = gr.Dropdown(list(CLONE_LANG_CODES), value="English", label="Test language")
+                        voice_test = gr.Button("▶ Test my voice", variant="secondary")
+                        voice_test_audio = gr.Audio(label="Test result", interactive=False)
+                        voice_test_msg = gr.Markdown()
+                        gr.Markdown(
+                            "<span class='vs-hint'>Works in " + ", ".join(CLONE_LANG_CODES) + ". "
+                            "Urdu and Punjabi are not supported by the free cloning model yet, so those use the "
+                            "standard voices. The result is a close likeness, not a perfect copy. Each few "
+                            "sentences use about a minute of your free daily GPU time. "
+                            "Only use your own voice, or one you have permission to use.</span>")
+                voice_save.click(save_my_voice, voice_rec, voice_msg)
+                voice_delete.click(delete_my_voice, None, voice_msg)
+                voice_test.click(test_my_voice, voice_test_lang, [voice_test_audio, voice_test_msg])
 
             # ---------------------------------------------------------- Settings
             with gr.Tab("⚙️ Settings", id="settings"):

@@ -188,6 +188,15 @@ class VideoStudioCoreTests(unittest.TestCase):
         self.assertEqual((story.prompt, story.aspect_ratio, story.language, story.music_mood),
                          ("Story video", "1:1", "Urdu", "Calm"))
 
+    def test_my_voice_choice_sets_cloning_and_keeps_a_backup_voice(self):
+        sett = app.build_ai_settings("boat", "16:9", 5, "Hi", "English", app.MY_VOICE, "Calm", True, "1080p", "Cinematic")
+        self.assertEqual((sett.use_my_voice, sett.voice_gender), (True, "Female"))
+        sett = app.build_story_settings("sea", "", "9:16", "English", "Male", "Calm", True, "Cinematic")
+        self.assertEqual((sett.use_my_voice, sett.voice_gender), (False, "Male"))
+        sett = app.build_story_settings("sea", "", "9:16", "English", "<script>", "Calm", True, "Cinematic")
+        self.assertEqual((sett.use_my_voice, sett.voice_gender), (False, "Female"))
+        self.assertIn("Record or upload", app.save_my_voice(None))
+
     def test_settings_never_prefill_saved_secrets(self):
         cfg = app.STUDIO.config
         saved = (cfg.gemini_api_key, cfg.hf_token, cfg.pexels_api_key, cfg.pixabay_api_key)
