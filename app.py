@@ -24,6 +24,7 @@ import gradio as gr
 from gradio.themes import GoogleFont, Soft
 
 from video_studio import (
+    CLONE_LANG_CODES,
     DEFAULT_OUTPUT_DIR,
     MUSIC_MOODS,
     STYLE_PRESETS,
@@ -52,7 +53,8 @@ SHAPES = [
 SHAPE_VALUES = [v for _, v in SHAPES]
 QUALITIES = ["720p", "1080p", "4K"]
 LANGUAGES = list(TTS_VOICES.keys())
-VOICES = ["Female", "Male"]
+MY_VOICE = "My voice"
+VOICES = ["Female", "Male", MY_VOICE]
 STYLES = list(STYLE_PRESETS.keys())
 MUSIC = MUSIC_MOODS                        # includes "None"
 SUBTITLE_STYLE = "Classic White"
@@ -324,6 +326,11 @@ def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> t
 # ---------------------------------------------------------------------------
 
 
+def _standard_voice(voice: Any) -> str:
+    """The standard voice to use (also the backup when 'My voice' is chosen)."""
+    return voice if voice in ("Female", "Male") else "Female"
+
+
 def build_ai_settings(prompt, shape, seconds, narration, language, voice, music, subtitles,
                       quality, style) -> JobSettings:
     return JobSettings(
@@ -333,7 +340,8 @@ def build_ai_settings(prompt, shape, seconds, narration, language, voice, music,
         duration=_number(seconds, 5.0, *CLIP_SECONDS),
         voice_script=_text(narration, TEXT_LIMITS["narration"]),
         language=_choice(language, LANGUAGES, "English"),
-        voice_gender=_choice(voice, VOICES, "Female"),
+        voice_gender=_standard_voice(voice),
+        use_my_voice=(voice == MY_VOICE),
         music_mood=_choice(music, MUSIC, "Ambient"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -349,7 +357,8 @@ def build_story_settings(topic, script, shape, language, voice, music, subtitles
         script_text=_text(script, TEXT_LIMITS["script"]),
         aspect_ratio=_choice(shape, SHAPE_VALUES, "16:9"),
         language=_choice(language, LANGUAGES, "English"),
-        voice_gender=_choice(voice, VOICES, "Female"),
+        voice_gender=_standard_voice(voice),
+        use_my_voice=(voice == MY_VOICE),
         music_mood=_choice(music, MUSIC, "Calm"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -435,6 +444,65 @@ def stop_job(job_id: str) -> str:
     return "⏹️ Stopping…" if STUDIO.queue.cancel(job_id) else "That video already finished."
 
 
+# ---------------------------------------------------------------------------
+# My voice (voice cloning)
+# ---------------------------------------------------------------------------
+
+VOICE_TEST_LINE = "Hello! This is my own voice, speaking from VideoStudio."
+
+
+def my_voice_status() -> str:
+    cloner = STUDIO.audio_engine.voice_cloner
+    if not cloner.has_sample():
+        return "⚪ No voice saved yet."
+    lines = [f"🟢 Your voice is saved. Choose **{MY_VOICE}** under *More options → Voice* when you make a video."]
+    if not STUDIO.config.hf_token.strip():
+        lines.append("⚠️ One more step: add the free Hugging Face token in **Settings** (voice cloning runs on the free GPUs).")
+    return "\n\n".join(lines)
+
+
+def save_my_voice(recording: Optional[str]) -> str:
+    if not recording:
+        return "✏️ Record or upload your voice first."
+    try:
+        seconds = STUDIO.audio_engine.voice_cloner.save_sample(Path(recording))
+    except ValueError as exc:
+        return f"❌ {exc}"
+    return f"✅ Saved {seconds:.0f} seconds of your voice.\n\n{my_voice_status()}"
+
+
+def delete_my_voice() -> str:
+    STUDIO.audio_engine.voice_cloner.delete_sample()
+    return "🗑️ Your voice sample was deleted from this computer."
+
+
+def test_my_voice(language: str):
+    cloner = STUDIO.audio_engine.voice_cloner
+    lang = _choice(language, list(CLONE_LANG_CODES), "English")
+    out = DEFAULT_OUTPUT_DIR / "audio_temp" / "my_voice_test.mp3"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cloner.synthesize(VOICE_TEST_LINE, lang, out)
+    except Exception as exc:
+        reason = redact_sensitive_text(str(exc))
+        if "ZeroGPU" in reason:
+            reason = "today's free GPU time is used up. Try again later"
+        return None, f"❌ Could not test: {reason[:200]}."
+    return str(out), "✅ This is how your videos will sound."
+
+
+def turn_off() -> str:
+    """Stop the background server. The desktop shortcut starts it hidden, so
+    this is the only visible way to end it."""
+    def _exit() -> None:
+        STUDIO.queue.shutdown()
+        os._exit(0)
+
+    import threading
+    threading.Timer(1.0, _exit).start()
+    return "👋 VideoStudio is turned off. Close this tab; use the desktop shortcut to start it again."
+
+
 def open_videos_folder() -> None:
     v_dir = DEFAULT_OUTPUT_DIR / "videos"
     v_dir.mkdir(parents=True, exist_ok=True)
@@ -483,17 +551,34 @@ def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: 
 def backend_status_html() -> str:
     labels = {
         "colab": "Your Colab GPU worker",
+        "ltx23": "LTX-2.3 (free cloud)",
+        "wan22": "Wan 2.2 (free cloud)",
         "ltx": "LTX-Video (free cloud)",
-        "cogvideox": "CogVideoX (free cloud)",
-        "wan_official": "Wan 2.1 (free cloud queue)",
+        "cogvideox": "CogVideoX (free cloud, wide and square only)",
     }
+    has_token = bool(STUDIO.config.hf_token.strip())
     rows = []
-    for name, label in labels.items():
+    for name in STUDIO.config.backend_order:
+        label = labels.get(name)
+        if not label:
+            continue
         be = STUDIO.backends.get(name)
         ok = bool(be and be.available())
-        state = "ready" if ok else ("add the Colab URL to use" if name == "colab" else "unavailable")
+        if name == "colab":
+            state = "ready" if ok else "add the Colab URL to use"
+        elif has_token:
+            state = "ready"
+            ok = True
+        else:
+            state = "needs the free Hugging Face token"
+            ok = False
         rows.append(f"{'🟢' if ok else '⚪'} <b>{label}</b> — {state}")
-    return "<div class='q-card'>" + "<br>".join(rows) + "</div>"
+    note = "" if has_token or STUDIO.config.colab_url.strip() else (
+        "<div class='vs-hint' style='margin-top:8px;'>Without a Hugging Face token the free GPUs refuse "
+        "video jobs, so Quick clip uses pictures with camera motion instead. The token is free: create an "
+        "account at huggingface.co, open Settings → Access Tokens, make a <b>Read</b> token and paste it "
+        "on the left.</div>")
+    return "<div class='q-card'>" + "<br>".join(rows) + note + "</div>"
 
 
 def render_queue_table() -> str:
@@ -572,7 +657,8 @@ def build_app() -> gr.Blocks:
                         clip_card = gr.HTML(idle_card("Your video will appear here."))
                         clip_video = gr.Video(label="Your video", interactive=False, height=360)
                         gr.Markdown("<span class='vs-hint'>A 5-second clip usually takes 1–3 minutes. "
-                                    "If the free GPUs are busy, it waits and retries by itself.</span>")
+                                    "Real AI video needs the free Hugging Face token (see Settings); "
+                                    "if the free GPUs are busy, it waits and retries by itself.</span>")
 
                 improve_btn.click(improve_idea, [clip_prompt, clip_style], clip_prompt)
                 clip_make.click(
@@ -625,10 +711,43 @@ def build_app() -> gr.Blocks:
                 )
                 story_stop.click(stop_job, story_job_id, story_status)
 
+            # ---------------------------------------------------------- My voice
+            with gr.Tab("🎙️ My voice", id="voice"):
+                gr.Markdown(
+                    "Make the narrator sound like **you**. Free, and your recording stays on this computer "
+                    "(it is only sent to the free voice service while a video is being made).\n\n"
+                    "**1.** Record yourself reading anything for **10 to 20 seconds** in a quiet room "
+                    "(or upload a recording). **2.** Press **Save my voice**. "
+                    f"**3.** When making a video, open *More options* and choose **Voice → {MY_VOICE}**."
+                )
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=5):
+                        voice_rec = gr.Audio(sources=["microphone", "upload"], type="filepath",
+                                             label="Your voice (10 to 20 seconds)")
+                        with gr.Row():
+                            voice_save = gr.Button("💾 Save my voice", variant="primary", scale=3)
+                            voice_delete = gr.Button("🗑️ Delete", variant="secondary", scale=1)
+                        voice_msg = gr.Markdown(my_voice_status())
+                    with gr.Column(scale=5):
+                        voice_test_lang = gr.Dropdown(list(CLONE_LANG_CODES), value="English", label="Test language")
+                        voice_test = gr.Button("▶ Test my voice", variant="secondary")
+                        voice_test_audio = gr.Audio(label="Test result", interactive=False)
+                        voice_test_msg = gr.Markdown()
+                        gr.Markdown(
+                            "<span class='vs-hint'>Works in " + ", ".join(CLONE_LANG_CODES) + ". "
+                            "Urdu and Punjabi are not supported by the free cloning model yet, so those use the "
+                            "standard voices. The result is a close likeness, not a perfect copy. Each few "
+                            "sentences use about a minute of your free daily GPU time. "
+                            "Only use your own voice, or one you have permission to use.</span>")
+                voice_save.click(save_my_voice, voice_rec, voice_msg)
+                voice_delete.click(delete_my_voice, None, voice_msg)
+                voice_test.click(test_my_voice, voice_test_lang, [voice_test_audio, voice_test_msg])
+
             # ---------------------------------------------------------- Settings
             with gr.Tab("⚙️ Settings", id="settings"):
                 gr.Markdown(
-                    "Everything works **without** these keys. Adding them gives better results. "
+                    "Story video works **without** any key. Real AI video in Quick clip needs the free "
+                    "Hugging Face token; the other keys just give better results. "
                     "Keys are saved only on this computer and are never shown again in this page."
                 )
                 cfg = STUDIO.config
@@ -657,6 +776,8 @@ def build_app() -> gr.Blocks:
                         gr.Markdown("**Recent videos**")
                         queue_box = gr.HTML(render_queue_table())
                         folder_btn = gr.Button("📂 Open my videos folder", variant="secondary")
+                        off_btn = gr.Button("⏻ Turn off VideoStudio", variant="secondary")
+                        off_msg = gr.Markdown()
                         with gr.Accordion("Technical log", open=False):
                             log_box = gr.Textbox(lines=10, interactive=False, show_label=False)
                             gr.Button("Refresh log", size="sm").click(read_system_logs, None, log_box)
@@ -666,6 +787,7 @@ def build_app() -> gr.Blocks:
                     save_api_credentials, [cfg_colab, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini], save_msg,
                 ).then(backend_status_html, None, backend_box)
                 folder_btn.click(open_videos_folder)
+                off_btn.click(turn_off, None, off_msg)
 
         gr.HTML(f"<div id='vs-footer'>{DEVELOPER_ATTRIBUTION} · "
                 "<a href='https://github.com/Kamran5H/VideoStudio' target='_blank'>GitHub</a></div>")

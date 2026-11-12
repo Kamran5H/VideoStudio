@@ -5,13 +5,13 @@ Crafted with precision for Kamran Ashraf (Kami).
 All-in-One Architecture:
   1. Environment & Hardware Probe    — HardwareProbe (CPU/GPU/CUDA/RAM/Disk)
   2. Configuration & Persistence     — StudioConfig (Colab, HF, Pexels, Pixabay, Gemini keys)
-  3. Prompt Engine & Script Writer    — PromptEngine & FreeLLMPromptEnhancer (10+ styles, Pollinations, DDG, Gemini)
-  4. Generative AI Video Backends     — Colab (Wan2.1-1.3B), LTX-Video, CogVideoX, Wan2.1-14B, Veo3 Free, Test Pattern
-  5. Media & Stock Asset Fetcher      — MediaFetcher (Pexels Video/Photo, Pixabay, Wikimedia, Pollinations Flux, Gemini)
-  6. Multilingual Neural Audio        — AudioEngine (Edge-TTS 10+ langs, Punjabi/Urdu/English/Arabic, Synth BGM, Auto-Ducking)
-  7. Professional Subtitles & Karaoke — SubtitleEngine (Whisper Word-by-Word Karaoke, Styled Burn-in, Translation)
-  8. Video Compositor & FX            — VideoEngine (Ken Burns 3D Zoom, 60fps Interpolation, 4K Upscale, Watermark, Anti-Fingerprint)
-  9. Pipeline Orchestrator            — VideoStudioPro (AI Diffusion, Multi-Scene Storyboards, Hybrid Storytelling)
+  3. Prompt Engine & Script Writer    — PromptEngine & FreeLLMPromptEnhancer (11 styles, Gemini, Pollinations, offline)
+  4. Generative AI Video Backends     — Colab (Wan2.1-1.3B), LTX-2.3, Wan2.2-14B, LTX-Video, CogVideoX-5B, Test Pattern
+  5. Media & Stock Asset Fetcher      — MediaFetcher (Pexels Video/Photo, Pixabay, Wikimedia, Pollinations Flux)
+  6. Multilingual Neural Audio        — AudioEngine (Edge-TTS 10 languages, Synth BGM, Auto-Ducking)
+  7. Subtitles                        — SubtitleEngine (word-timed captions, styled burn-in, translation)
+  8. Video Compositor & FX            — VideoEngine (Ken Burns, crossfades, 60fps interpolation, upscale, clip conform)
+  9. Pipeline Orchestrator            — VideoStudio (AI diffusion clips, multi-scene storyboards)
  10. Persistent Batch Job Queue       — JobQueue (JSON persistence, auto-retry on quota refresh, live callbacks)
 """
 
@@ -343,7 +343,7 @@ class StudioConfig:
     pixabay_api_key: str = ""
     gemini_api_key: str = ""
     backend_order: list[str] = field(default_factory=lambda: [
-        "colab", "ltx", "cogvideox", "wan_official", "test_pattern"
+        "colab", "ltx23", "wan22", "ltx", "cogvideox", "test_pattern"
     ])
     quota_wait_cap_min: int = 45
     max_deferrals_per_job: int = 48           # quota/network waits before a job is Failed
@@ -380,12 +380,14 @@ class StudioConfig:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 known = {f.name for f in dataclasses.fields(cls)}
                 cfg = cls(**{k: v for k, v in data.items() if k in known})
-                # Drop the retired veo3_free pseudo-backend from any old config.
-                cfg.backend_order = [b for b in cfg.backend_order if b != "veo3_free"]
-                for be in ("colab", "ltx", "cogvideox", "wan_official"):
-                    if be not in cfg.backend_order:
-                        idx = cfg.backend_order.index("test_pattern") if "test_pattern" in cfg.backend_order else len(cfg.backend_order)
-                        cfg.backend_order.insert(idx, be)
+                # The backend list changes as free Spaces die or appear (the
+                # Wan-AI/Wan2.1 Space is permanently down; veo3_free was never
+                # real). The order is not user-editable in the UI, so a saved
+                # list that names a different set is simply replaced.
+                default_order = cls().backend_order
+                if (not isinstance(cfg.backend_order, list)
+                        or set(cfg.backend_order) != set(default_order)):
+                    cfg.backend_order = default_order
                 return cfg
             except Exception as exc:
                 log.warning("Config load failed (%s); using defaults", exc)
@@ -527,7 +529,18 @@ def looks_like_prompt(text: str) -> bool:
     return not any(m in head for m in ("error", "rate limit", "too many requests", "queue full", "unauthorized"))
 
 
-DEFAULT_GEMINI_MODELS =("gemini-2.5-flash", "gemini-2.5-flash-lite")
+SCRIPT_RETRY_PAUSE = 6.0      # seconds between attempts at the free script writer
+
+
+def looks_like_script(text: str) -> bool:
+    """A usable storyboard reply: labelled Visual:/VO: lines, not an error page."""
+    t = (text or "").strip()
+    if not t or t[0] in "<{[" or len(t) > 20000:
+        return False
+    return bool(re.search(r"(?im)^\W*visual\W*:", t)) and bool(re.search(r"(?im)^\W*(vo|voiceover|narration)\W*:", t))
+
+
+DEFAULT_GEMINI_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
 
 
 def gemini_models() -> List[str]:
@@ -633,17 +646,53 @@ class FreeLLMPromptEnhancer:
             except Exception as e:
                 log.debug("Gemini script generation fallback: %s", e)
 
-        # 2. Template Fallback Script
-        return (
-            f"Visual: {prompt} aerial dramatic cinematic 8k\n"
-            f"VO: Welcome to an exploration of {prompt}. Every detail tells a story of wonder and discovery.\n\n"
-            f"Visual: {prompt} close up detail macro lighting\n"
-            f"VO: When we look closer, we uncover the hidden beauty and intricate dynamics at play.\n\n"
-            f"Visual: {prompt} epic landscape golden hour\n"
-            f"VO: The possibilities are endless when creativity meets innovation.\n\n"
-            f"Visual: {prompt} inspiring sunrise horizon\n"
-            f"VO: Thank you for watching. Like, follow, and stay inspired for what comes next."
-        )
+        # 2. Free Pollinations text model (no key, no billing)
+        try:
+            import urllib.parse
+
+            import requests
+            ask = (
+                f"Write a {scene_count}-scene video script about '{prompt}'. For each scene output exactly "
+                "two lines. Visual: 3-6 English keywords for stock footage. "
+                f"VO: 1-2 sentences of spoken narration in {language}. "
+                "Output only the Visual: and VO: lines, no titles, no numbering."
+            )
+            url = f"https://text.pollinations.ai/{urllib.parse.quote(ask)}"
+            # The free tier queues behind image requests from the same address,
+            # and sometimes answers 402/429 for a few seconds, so allow a slow
+            # answer and two retries before using the offline template.
+            for attempt in range(3):
+                try:
+                    resp = requests.get(url, timeout=60)
+                    text = resp.text.strip() if resp.status_code == 200 else ""
+                    if looks_like_script(text):
+                        return text
+                    log.info("Free script writer gave no usable script (HTTP %s)", resp.status_code)
+                except requests.RequestException as exc:
+                    log.info("Free script writer unavailable: %s", type(exc).__name__)
+                if attempt < 2:
+                    time.sleep(SCRIPT_RETRY_PAUSE * (attempt + 1))
+        except Exception as exc:
+            log.debug("Pollinations script fallback: %s", exc)
+
+        # 3. Offline template (English), honouring the requested scene count
+        template = [
+            (f"{prompt} aerial dramatic cinematic",
+             f"Welcome to an exploration of {prompt}. Every detail tells a story of wonder and discovery."),
+            (f"{prompt} close up detail macro lighting",
+             "When we look closer, we uncover the hidden beauty and intricate dynamics at play."),
+            (f"{prompt} people everyday life",
+             f"For many of us, {prompt} is closer to daily life than we ever notice."),
+            (f"{prompt} epic landscape golden hour",
+             "Seen from a distance, the bigger picture finally comes together."),
+            (f"{prompt} slow motion detail",
+             "Slow down for a moment, and the small things start to matter."),
+            (f"{prompt} inspiring sunrise horizon",
+             f"And that is the story of {prompt}. Thank you for watching."),
+        ]
+        count = max(1, min(int(scene_count), len(template)))
+        picked = template[:count - 1] + [template[-1]] if count > 1 else template[:1]
+        return "\n\n".join(f"Visual: {v}\nVO: {n}" for v, n in picked)
 
 # ----------------------------------------------------------------------------
 # 4. Generative AI Video Backends
@@ -669,9 +718,12 @@ QUALITY_TIERS = ["480p", "720p", "1080p", "4K"]
 
 
 def output_size(aspect_ratio: str, short_edge: int = 1080) -> Tuple[int, int]:
-    """Even (width, height) for an aspect ratio with the given short edge.
-    Unknown ratios fall back to 16:9."""
-    bw, bh = ASPECT_SIZES.get(aspect_ratio, ASPECT_SIZES["16:9"])
+    """Even (width, height) for an aspect ratio with the given short edge:
+    16:9 -> 1920x1080, 9:16 -> 1080x1920, 1:1 -> 1080x1080. The ratio comes
+    from the name itself (the 832x480 generation bucket is only ~16:9 and used
+    to give 1872x1080). Unknown ratios fall back to 16:9."""
+    m = re.fullmatch(r"\s*(\d+)\s*:\s*(\d+)\s*", aspect_ratio or "")
+    bw, bh = (int(m.group(1)), int(m.group(2))) if m and int(m.group(1)) and int(m.group(2)) else (16, 9)
     if bw >= bh:
         w, h = short_edge * bw / bh, short_edge
     else:
@@ -741,8 +793,17 @@ def is_transient_error(error_text: str) -> bool:
     return any(m in low for m in _TRANSIENT_MARKERS)
 
 
+_ZEROGPU_LIMIT = re.compile(r"ZeroGPU (quota|runs limit)", re.IGNORECASE)
+
+
 def quota_wait_seconds(error_text: str) -> Optional[int]:
-    if "ZeroGPU quota" not in error_text:
+    """Seconds to wait for a ZeroGPU limit error, or None for any other error.
+
+    Hugging Face words it two ways (both seen live): "You have exceeded your
+    ZeroGPU quota (120s requested vs. -60s left). Try again in 0:00:00." and
+    "You have exceeded your ZeroGPU runs limit."
+    """
+    if not _ZEROGPU_LIMIT.search(error_text or ""):
         return None
     hint = 0
     m = re.search(r"Try again in (\d+):(\d{2}):(\d{2})", error_text)
@@ -754,6 +815,17 @@ def quota_wait_seconds(error_text: str) -> Optional[int]:
     if m2:
         need = int(m2.group(1)) - int(m2.group(2))
     return max(hint, min(need, 3600), 60) + 20
+
+def quota_needs_token(error_text: str) -> bool:
+    """True when Hugging Face itself says the caller should sign in for quota.
+
+    Anonymous ZeroGPU quota is smaller than a single video generation, so the
+    Space answers "Try again in 0:00:00" forever. Waiting never helps there;
+    only a (free) Hugging Face token does.
+    """
+    text = error_text or ""
+    return bool(_ZEROGPU_LIMIT.search(text)) and "Authenticate with a Hugging Face token" in text
+
 
 def hf_space_client(space: str, hf_token: str = "") -> Any:
     """gradio_client.Client for a HF Space, authenticated when a token is set.
@@ -800,8 +872,42 @@ class GenerationBackend:
     def available(self) -> bool:
         return True
 
+    def supports(self, req: GenerationRequest) -> bool:
+        """False when this model cannot produce the requested shape at all."""
+        return True
+
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
         raise NotImplementedError
+
+    @staticmethod
+    def _aspect_key(req: GenerationRequest) -> str:
+        """Closest of the three shapes every Space offers."""
+        ratio = req.width / max(req.height, 1)
+        if ratio > 1.2:
+            return "16:9"
+        if ratio < 0.84:
+            return "9:16"
+        return "1:1"
+
+    @staticmethod
+    def _param_choices(client: Any, api_name: str, parameter: str) -> List[str]:
+        """Dropdown choices a Space endpoint accepts for one parameter."""
+        try:
+            api = client.view_api(return_format="dict", print_info=False)
+            ep = (api.get("named_endpoints", {}) or {}).get(api_name) or {}
+            for p in ep.get("parameters", []):
+                if p.get("parameter_name") == parameter:
+                    return re.findall(r"'([^']+)'", str((p.get("python_type") or {}).get("type", "")))
+        except Exception:
+            pass
+        return []
+
+    def _raise_quota(self, exc: Exception, label: str) -> None:
+        """Re-raise a ZeroGPU quota error as QuotaExhausted; otherwise return."""
+        text = str(exc)
+        wait = quota_wait_seconds(text)
+        if wait:
+            raise QuotaExhausted(wait, f"{label} ZeroGPU Quota Limit: {text[:300]}") from exc
 
     @staticmethod
     def _extract_video(result: Any) -> Optional[str]:
@@ -896,7 +1002,8 @@ class LTXSpaceBackend(GenerationBackend):
     name = "ltx"
     description = "Free LTX-Video AI (Hugging Face ZeroGPU)"
     SPACE = "Lightricks/ltx-video-distilled"
-    MAX_SECONDS = 8.0
+    MAX_SECONDS = 7.0      # the Space allows 8.5 s, but above 7 s it bills 25% more GPU time
+    MAX_SIDE = 1280        # Space slider maximum; sides must be multiples of 32
     supports_image_conditioning = True
 
     def __init__(self, config: StudioConfig):
@@ -908,9 +1015,9 @@ class LTXSpaceBackend(GenerationBackend):
             self._client = hf_space_client(self.SPACE, self.config.hf_token)
         return self._client
 
-    @staticmethod
-    def _snap32(v: int) -> int:
-        return max((v // 32) * 32, 256)
+    @classmethod
+    def _snap32(cls, v: int) -> int:
+        return min(max((v // 32) * 32, 256), cls.MAX_SIDE)
 
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
         w, h = self._snap32(req.width), self._snap32(req.height)
@@ -950,10 +1057,7 @@ class LTXSpaceBackend(GenerationBackend):
                                input_image_filepath=None,
                                mode="text-to-video")
         except Exception as exc:
-            err_str = str(exc)
-            wait = quota_wait_seconds(err_str)
-            if wait:
-                raise QuotaExhausted(wait, "LTX ZeroGPU Quota Limit") from exc
+            self._raise_quota(exc, "LTX")
             raise
 
         path = self._extract_video(result)
@@ -962,10 +1066,21 @@ class LTXSpaceBackend(GenerationBackend):
         shutil.copyfile(path, out_path)
         return out_path
 
-class CogVideoXBackend(GenerationBackend):
-    name = "cogvideox"
-    description = "Free CogVideoX-5B AI (Hugging Face ZeroGPU)"
-    SPACE = "THUDM/CogVideoX-5B-Space"
+class LTX23Backend(GenerationBackend):
+    """Official Lightricks LTX-2.3 Space (22B distilled, 24 fps, text or image start).
+
+    Signature and limits are taken from the Space's own app.py:
+    generate_video(input_image, prompt, duration, enhance_prompt, seed,
+    randomize_seed, height, width); duration 1-10 s; fixed resolutions per
+    shape; 75 s of ZeroGPU time per call.
+    """
+    name = "ltx23"
+    description = "Free LTX-2.3 AI (official Lightricks Space, ZeroGPU)"
+    SPACE = "Lightricks/LTX-2-3"
+    API = "/generate_video"
+    MAX_SECONDS = 10.0
+    RESOLUTIONS = {"16:9": (1536, 1024), "9:16": (1024, 1536), "1:1": (1024, 1024)}
+    supports_image_conditioning = True
 
     def __init__(self, config: StudioConfig):
         self.config = config
@@ -975,6 +1090,115 @@ class CogVideoXBackend(GenerationBackend):
         if self._client is None:
             self._client = hf_space_client(self.SPACE, self.config.hf_token)
         return self._client
+
+    def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
+        w, h = self.RESOLUTIONS[self._aspect_key(req)]
+        seconds = round(min(max(req.num_frames / max(req.fps, 1), 1.0), self.MAX_SECONDS), 1)
+        client = self._get_client()
+        image = None
+        if req.init_image:
+            from gradio_client import handle_file
+            image = handle_file(req.init_image)
+        payload: Dict[str, Any] = dict(
+            input_image=image, prompt=req.prompt, duration=seconds,
+            enhance_prompt=False,             # the studio already enhanced the prompt
+            seed=req.seed if req.seed >= 0 else 42, randomize_seed=(req.seed < 0),
+            height=h, width=w,
+        )
+        accepted = self._accepted_params(client, self.API)
+        if accepted:
+            payload = {k: v for k, v in payload.items() if k in accepted}
+        progress(f"LTX-2.3: {'continuing from last frame' if image else 'text-to-video'} {w}x{h}, {seconds:.1f}s...")
+        try:
+            result = self._predict(client, api_name=self.API, **payload)
+        except Exception as exc:
+            self._raise_quota(exc, "LTX-2.3")
+            raise
+        path = self._extract_video(result)
+        if not path:
+            raise RuntimeError(f"LTX-2.3 returned no video: {str(result)[:200]}")
+        shutil.copyfile(path, out_path)
+        return out_path
+
+
+class Wan22Backend(GenerationBackend):
+    """Wan 2.2 T2V-A14B with the 4-step Lightning LoRA (free ZeroGPU Space).
+
+    From the Space's app.py: generate_video(prompt, aspect_ratio, steps,
+    negative_prompt, duration_seconds, guidance_scale, guidance_scale_2, seed,
+    randomize_seed); 16 fps, at most 80 frames (5 s); 4-8 steps, guidance 1.
+    It asks for the least GPU time of all backends (about 50 s for 5 s).
+    """
+    name = "wan22"
+    description = "Free Wan 2.2 14B AI (4-step Lightning, ZeroGPU)"
+    SPACE = "Upsampler/wan-2-2-14b-text-to-video"
+    API = "/generate_video"
+    MAX_SECONDS = 5.0
+    STEPS = 4
+    ASPECT_CHOICES = {"16:9": "16:9 (832x480)", "9:16": "9:16 (480x832)", "1:1": "1:1 (640x640)"}
+
+    def __init__(self, config: StudioConfig):
+        self.config = config
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self._client = hf_space_client(self.SPACE, self.config.hf_token)
+        return self._client
+
+    def _aspect_choice(self, client: Any, key: str) -> str:
+        # Prefer the label the Space currently publishes for this shape.
+        for choice in self._param_choices(client, self.API, "aspect_ratio"):
+            if choice.startswith(key):
+                return choice
+        return self.ASPECT_CHOICES[key]
+
+    def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
+        seconds = round(min(max(req.num_frames / max(req.fps, 1), 1.0), self.MAX_SECONDS), 1)
+        client = self._get_client()
+        choice = self._aspect_choice(client, self._aspect_key(req))
+        payload: Dict[str, Any] = dict(
+            prompt=req.prompt, aspect_ratio=choice, steps=self.STEPS,
+            negative_prompt=req.negative_prompt, duration_seconds=seconds,
+            guidance_scale=1, guidance_scale_2=1,     # Lightning LoRA: CFG off
+            seed=req.seed if req.seed >= 0 else 42, randomize_seed=(req.seed < 0),
+        )
+        accepted = self._accepted_params(client, self.API)
+        if accepted:
+            payload = {k: v for k, v in payload.items() if k in accepted}
+        progress(f"Wan 2.2: text-to-video {choice}, {seconds:.1f}s...")
+        try:
+            result = self._predict(client, api_name=self.API, **payload)
+        except Exception as exc:
+            self._raise_quota(exc, "Wan 2.2")
+            raise
+        path = self._extract_video(result)
+        if not path:
+            raise RuntimeError(f"Wan 2.2 returned no video: {str(result)[:200]}")
+        shutil.copyfile(path, out_path)
+        return out_path
+
+
+class CogVideoXBackend(GenerationBackend):
+    """CogVideoX-5B Space. Per its app.py it always renders 49 frames at
+    720x480 (6 s at 8 fps) and reserves 300 s of ZeroGPU time, so it is the
+    last resort and is skipped for tall videos (a 720x480 frame cropped to
+    9:16 keeps only 270 pixels of width)."""
+    name = "cogvideox"
+    description = "Free CogVideoX-5B AI (Hugging Face ZeroGPU)"
+    SPACE = "zai-org/CogVideoX-5B-Space"      # THUDM was renamed to zai-org
+
+    def __init__(self, config: StudioConfig):
+        self.config = config
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self._client = hf_space_client(self.SPACE, self.config.hf_token)
+        return self._client
+
+    def supports(self, req: GenerationRequest) -> bool:
+        return req.width >= req.height
 
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
         progress("CogVideoX-5B: generating AI clip (720x480)...")
@@ -989,10 +1213,7 @@ class CogVideoXBackend(GenerationBackend):
                 api_name="/generate",
             )
         except Exception as exc:
-            err_str = str(exc)
-            wait = quota_wait_seconds(err_str)
-            if wait:
-                raise QuotaExhausted(wait, "CogVideoX ZeroGPU Quota Limit") from exc
+            self._raise_quota(exc, "CogVideoX")
             raise
 
         path = self._extract_video(result)
@@ -1000,54 +1221,6 @@ class CogVideoXBackend(GenerationBackend):
             raise RuntimeError(f"CogVideoX returned no video: {str(result)[:200]}")
         shutil.copyfile(path, out_path)
         return out_path
-
-class WanOfficialBackend(GenerationBackend):
-    name = "wan_official"
-    description = "Official Wan2.1-14B 720p (Public Async Queue)"
-    SPACE = "Wan-AI/Wan2.1"
-    POLL_SECONDS = 12
-    MAX_WAIT = 2400
-
-    def __init__(self, config: StudioConfig):
-        self.config = config
-
-    def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
-        progress("Wan2.1-14B Official: connecting to space...")
-        client = hf_space_client(self.SPACE, self.config.hf_token)
-
-        size_choice = "1280*720" if req.width >= req.height else "720*1280"
-        progress(f"Wan2.1-14B Official: submitting {size_choice} job...")
-        # Map our fields onto whatever names the async endpoint currently
-        # exposes, then filter — the public Wan Space has changed its signature
-        # more than once, and an exact-kwarg call breaks the moment it does.
-        want = {
-            "prompt": req.prompt, "size_choice": size_choice, "size": size_choice,
-            "guidance_scale": req.guidance, "sampling_steps": req.steps,
-            "seed": req.seed if req.seed >= 0 else random.randint(0, 999999),
-        }
-        accepted = self._accepted_params(client, "/t2v_generation_async")
-        payload = {k: v for k, v in want.items() if not accepted or k in accepted}
-        sub_res = self._predict(client, api_name="/t2v_generation_async", timeout=120, **payload)
-        task_id = sub_res[0] if isinstance(sub_res, (list, tuple)) else sub_res
-
-        t0 = time.time()
-        while time.time() - t0 < self.MAX_WAIT:
-            time.sleep(self.POLL_SECONDS)
-            try:
-                stat = self._predict(client, task_id, api_name="/status_refresh", timeout=60)
-            except TimeoutError:
-                continue                 # slow poll: try again next interval
-            except Exception:
-                # Older/newer Space builds poll with no argument on the same
-                # session — fall back to that form instead of failing the job.
-                stat = self._predict(client, api_name="/status_refresh", timeout=60)
-            v_path = self._extract_video(stat)
-            if v_path:
-                shutil.copyfile(v_path, out_path)
-                return out_path
-            progress(f"Wan2.1-14B queue: waiting ({int(time.time() - t0)}s)...")
-
-        raise TimeoutError("Wan2.1 Official Space queue timed out.")
 
 class TestPatternBackend(GenerationBackend):
     name = "test_pattern"
@@ -1067,6 +1240,8 @@ class TestPatternBackend(GenerationBackend):
 class MediaFetcher:
     """Intelligent Media & Stock Asset Fetcher (Pexels, Pixabay, Wikimedia, Pollinations Flux AI, Gemini)."""
 
+    POLLINATIONS_RETRY_PAUSES = (0, 8, 20)      # seconds before each attempt
+
     def __init__(self, config: Optional[StudioConfig] = None):
         self.config = config or StudioConfig()
         self.cache_dir = DEFAULT_OUTPUT_DIR / "media_cache"
@@ -1078,9 +1253,15 @@ class MediaFetcher:
         target_width: int = 1920,
         target_height: int = 1080,
         prefer_video: bool = True,
-        style: str = "Cinematic"
+        style: str = "Cinematic",
+        previous: Optional[Tuple[str, str]] = None,
     ) -> Tuple[str, str]:
-        """Fetches the best visual asset for a scene: returns (file_path, media_type: 'video'|'image')."""
+        """Fetches the best visual asset for a scene: returns (file_path, media_type: 'video'|'image').
+
+        ``previous`` is the asset of the scene before this one; if every
+        source fails it is reused, which keeps the video on topic instead of
+        cutting to an unrelated placeholder picture.
+        """
         clean_q = re.sub(r"[^\w\s]", " ", prompt).strip()
 
         # 1. Try Pexels Video Search
@@ -1126,10 +1307,10 @@ class MediaFetcher:
         except Exception as e:
             log.debug("Pollinations AI image generation fallback: %s", e)
 
-        # 6. Local Asset Fallback
-        local_fallback = ASSETS_DIR / "test_diag_stock.jpg"
-        if local_fallback.exists():
-            return str(local_fallback), "image"
+        # 6. Stay on topic: reuse the previous scene's visual
+        if previous and Path(previous[0]).exists():
+            log.warning("No new visual found for %r; reusing the previous scene's.", clean_q[:40])
+            return previous
 
         # 7. Generate Synthetic Gradient Image
         synth_img = self._generate_synthetic_image(prompt, target_width, target_height)
@@ -1256,14 +1437,26 @@ class MediaFetcher:
 
     def _generate_pollinations_image(self, prompt: str, width: int, height: int, style: str) -> Optional[str]:
         import urllib.parse
-        enhanced = PromptEngine().enhance(prompt, preset=style)
+        # Callers may pass an already-styled prompt (the AI-clip fallback does).
+        styled = any(prompt.startswith(p["prefix"]) for p in STYLE_PRESETS.values())
+        enhanced = prompt if styled else PromptEngine().enhance(prompt, preset=style)
         encoded = urllib.parse.quote(enhanced[:300])
         # Snap dimensions to valid multiples
         w = (width // 64) * 64
         h = (height // 64) * 64
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&model=flux&nologo=true&seed={random.randint(1,999999)}"
         out = self.cache_dir / f"flux_{uuid.uuid4().hex[:8]}.jpg"
-        return self._download(url, out, min_bytes=10_000, timeout=60)
+        # The free tier serves one image at a time per address and answers
+        # 429 to anything faster, so back off and try again.
+        for attempt, pause in enumerate(self.POLLINATIONS_RETRY_PAUSES):
+            if pause:
+                time.sleep(pause)
+            url = (f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}"
+                   f"&model=flux&nologo=true&seed={random.randint(1, 999999)}")
+            got = self._download(url, out, min_bytes=10_000, timeout=90)
+            if got:
+                return got
+            log.debug("Pollinations image attempt %d failed", attempt + 1)
+        return None
 
     def generate_nano_banana_frame(self, prompt: str, width: int = 1920, height: int = 1080, style: str = "Hyper-realistic") -> str:
         """Generates a stunning photorealistic 4K scene frame / visual pic without paid tokens or billing."""
@@ -1341,12 +1534,159 @@ TTS_VOICES: dict[str, dict[str, str]] = {
 
 MUSIC_MOODS = ["Ambient", "Uplifting", "Dramatic", "Calm", "Energetic", "None"]
 
+VOICES_DIR = DEFAULT_OUTPUT_DIR / "voices"
+MY_VOICE_PATH = VOICES_DIR / "my_voice.wav"
+
+# Languages the free cloning model speaks (Chatterbox Multilingual, 23 in all).
+# Urdu and Punjabi are not among them, so those keep the standard voices.
+CLONE_LANG_CODES: dict[str, str] = {
+    "English": "en", "Hindi": "hi", "Arabic": "ar", "Spanish": "es",
+    "French": "fr", "German": "de", "Chinese": "zh", "Japanese": "ja",
+}
+
+
+def split_for_cloning(text: str, limit: int = 280) -> List[str]:
+    """Split narration into pieces the cloning Space accepts (it silently cuts
+    anything past 300 characters), breaking at sentence ends where possible."""
+    pieces: List[str] = []
+    current = ""
+    for sentence in re.split(r"(?<=[.!?。！？۔،,;:])\s+", " ".join((text or "").split())):
+        while len(sentence) > limit:                      # one very long sentence
+            cut = sentence.rfind(" ", 0, limit)
+            cut = cut if cut > limit // 2 else limit
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if not sentence:
+            continue
+        if current and len(current) + 1 + len(sentence) > limit:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+class VoiceCloner:
+    """Speak narration in the user's own voice from a short recording.
+
+    Uses the free ResembleAI Chatterbox Multilingual Space (zero-shot cloning).
+    Per its app.py: generate_tts_audio(text_input, language_id,
+    audio_prompt_path_input, exaggeration_input, temperature_input,
+    seed_num_input, cfgw_input), at most 300 characters and about one minute
+    of ZeroGPU time per call. It needs the same free Hugging Face token as the
+    video engines.
+    """
+    SPACE = "ResembleAI/Chatterbox-Multilingual-TTS"
+    API = "/generate_tts_audio"
+    MIN_SAMPLE_SECONDS = 5.0
+    MAX_SAMPLE_SECONDS = 30.0
+
+    def __init__(self, config: Optional[StudioConfig] = None, sample_path: Path = MY_VOICE_PATH):
+        self.config = config or StudioConfig()
+        self.sample_path = Path(sample_path)
+        self._client: Any = None
+
+    def has_sample(self) -> bool:
+        return self.sample_path.is_file() and self.sample_path.stat().st_size > 1000
+
+    def save_sample(self, source: Path) -> float:
+        """Store a recording as the voice sample (mono WAV, quiet edges cut,
+        at most 30 s). Returns its length; raises ValueError if unusable."""
+        source = Path(source)
+        if not source.is_file():
+            raise ValueError("No recording was received.")
+        self.sample_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.sample_path.with_name("my_voice_new.wav")
+        try:
+            run_ffmpeg([
+                "-i", str(source), "-vn", "-ac", "1", "-ar", "24000",
+                # dynaudnorm, not loudnorm: silenceremove feeding loudnorm
+                # deadlocks ffmpeg on short clean recordings.
+                "-af", "silenceremove=start_periods=1:start_threshold=-45dB,dynaudnorm",
+                "-t", f"{self.MAX_SAMPLE_SECONDS}", str(tmp),
+            ], timeout=60)
+        except FFmpegError as exc:
+            tmp.unlink(missing_ok=True)
+            raise ValueError("That file could not be read as audio.") from exc
+        seconds = ffprobe_duration(tmp)
+        if seconds < self.MIN_SAMPLE_SECONDS:
+            tmp.unlink(missing_ok=True)
+            raise ValueError(f"The recording is too short ({seconds:.0f}s). Speak for 10 to 20 seconds.")
+        tmp.replace(self.sample_path)
+        return seconds
+
+    def delete_sample(self) -> None:
+        self.sample_path.unlink(missing_ok=True)
+
+    def unavailable_reason(self, language: str) -> str:
+        """Why cloning cannot be used right now ('' when it can)."""
+        if not self.has_sample():
+            return "no voice sample is saved yet (see the My voice tab)"
+        if language not in CLONE_LANG_CODES:
+            return f"voice cloning does not support {language} yet"
+        if not self.config.hf_token.strip():
+            return "voice cloning needs the free Hugging Face token (see Settings)"
+        return ""
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            self._client = hf_space_client(self.SPACE, self.config.hf_token)
+        return self._client
+
+    def synthesize(self, text: str, language: str, out_path: Path) -> Path:
+        """Narrate `text` in the saved voice. Raises on any failure so the
+        caller can fall back to a standard voice."""
+        reason = self.unavailable_reason(language)
+        if reason:
+            raise RuntimeError(reason)
+        from gradio_client import handle_file
+        client = self._get_client()
+        parts: List[Path] = []
+        work = out_path.with_suffix("")
+        try:
+            for i, piece in enumerate(split_for_cloning(text)):
+                result = GenerationBackend._predict(
+                    client,
+                    text_input=piece, language_id=CLONE_LANG_CODES[language],
+                    audio_prompt_path_input=handle_file(str(self.sample_path)),
+                    exaggeration_input=0.5, temperature_input=0.8, seed_num_input=0, cfgw_input=0.5,
+                    api_name=self.API, timeout=300,
+                )
+                produced = result[0] if isinstance(result, (list, tuple)) else result
+                if isinstance(produced, dict):
+                    produced = produced.get("path") or produced.get("url")
+                if not produced or not Path(str(produced)).is_file():
+                    raise RuntimeError(f"the voice service returned no audio: {str(result)[:120]}")
+                part = Path(f"{work}_part{i:02d}.wav")
+                shutil.copyfile(str(produced), part)
+                parts.append(part)
+            if not parts:
+                raise RuntimeError("there was no text to speak")
+            inputs: List[str] = []
+            for part in parts:
+                inputs.extend(["-i", str(part)])
+            joined = "".join(f"[{i}:a]" for i in range(len(parts)))
+            run_ffmpeg([*inputs, "-filter_complex", f"{joined}concat=n={len(parts)}:v=0:a=1[a]",
+                        "-map", "[a]", "-c:a", "libmp3lame", "-b:a", "192k", str(out_path)])
+            return out_path
+        finally:
+            for part in parts:
+                part.unlink(missing_ok=True)
+
+
 class AudioEngine:
     """Multilingual Neural TTS, Background Music Synthesis, and Sidechain Auto-Ducking."""
 
-    def __init__(self):
+    def __init__(self, config: Optional[StudioConfig] = None):
         self.temp_dir = DEFAULT_OUTPUT_DIR / "audio_temp"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.voice_cloner = VoiceCloner(config)
+        self.voice_note = ""        # why the cloned voice was not used, if it was asked for
 
     def generate_voiceover(
         self,
@@ -1356,9 +1696,28 @@ class AudioEngine:
         rate: str = "+0%",
         pitch: str = "+0Hz",
         out_path: Optional[Path] = None,
+        my_voice: bool = False,
     ) -> Tuple[Path, List[dict]]:
-        """Synthesizes speech using edge-tts and extracts word-boundary events."""
+        """Synthesizes speech and returns (audio, word-boundary events).
+
+        With ``my_voice`` the saved voice sample is cloned; that path returns
+        no word events (captions are then timed by estimate_word_events). If
+        cloning is not possible the standard voice is used and the reason is
+        kept in ``self.voice_note``.
+        """
         out = out_path or (self.temp_dir / f"vo_{uuid.uuid4().hex[:8]}.mp3")
+        if my_voice and text.strip():
+            try:
+                self.voice_cloner.synthesize(text, language, out)
+                if out.exists() and out.stat().st_size > 100:
+                    return out, []
+                raise RuntimeError("the voice service returned no audio")
+            except Exception as exc:
+                reason = str(exc)
+                if quota_wait_seconds(reason):
+                    reason = "today's free GPU time is used up"
+                self.voice_note = reason[:160]
+                log.warning("Cloned voice not used (%s); using the standard voice", reason[:200])
         lang_dict = TTS_VOICES.get(language, TTS_VOICES["English"])
         voice = lang_dict.get(gender, list(lang_dict.values())[0])
 
@@ -1567,6 +1926,27 @@ SUBTITLE_STYLES = {
         "Shadow": "1",
     },
 }
+
+def estimate_word_events(text: str, duration: float) -> List[dict]:
+    """Word timings spread across a narration clip in proportion to word length.
+
+    Edge-TTS reports exact word boundaries; the gTTS backup voice reports none,
+    which used to leave the video with no subtitles at all. An even spread is
+    close enough for caption lines of a few words.
+    """
+    words = (text or "").split()
+    if not words or duration <= 0:
+        return []
+    weights = [len(w) + 2 for w in words]          # +2: every word costs a small pause
+    total = float(sum(weights))
+    usable = max(duration - 0.15, duration * 0.9)  # speech rarely fills the very end
+    events, t = [], 0.0
+    for word, weight in zip(words, weights, strict=True):
+        span = usable * weight / total
+        events.append({"text": word, "offset": round(t, 3), "duration": round(span, 3)})
+        t += span
+    return events
+
 
 class SubtitleEngine:
     """Karaoke Subtitles, Burnt-in Captions, and Translation."""
@@ -1792,6 +2172,48 @@ class VideoEngine:
         return out_path
 
     @staticmethod
+    def conform_clip(video_path: Path, width: int, height: int, seconds: float) -> bool:
+        """Make a backend's clip match what was asked for, in place.
+
+        Free models return whatever they natively make: LTX-2.3 is 3:2 with a
+        sound track, CogVideoX is always 720x480 for 6 s, Wan 2.2 stops at
+        5 s. The clip is centre-cropped to the requested aspect ratio (at its
+        own resolution, so nothing is downscaled), cut or frozen to the
+        requested length, and its audio is dropped. Returns True if rewritten.
+        """
+        size = probe_video_size(video_path)
+        duration = ffprobe_duration(video_path)
+        if not size or duration <= 0:
+            return False
+        cw, ch = size
+        target = width / max(height, 1)
+        if cw / ch > target:
+            nw, nh = int(round(ch * target / 2)) * 2, ch - ch % 2
+        else:
+            nw, nh = cw - cw % 2, int(round(cw / target / 2)) * 2
+        nw, nh = max(2, min(nw, cw)), max(2, min(nh, ch))
+        needs_crop = abs(cw / ch - target) / target > 0.01
+        too_long = duration > seconds + 0.15
+        too_short = duration < seconds - 0.15
+        has_audio = bool(re.search(r"Stream #\d+:\d+.*Audio:", _ffmpeg_info(video_path)))
+        if not (needs_crop or too_long or too_short or has_audio):
+            return False
+        filters = []
+        if needs_crop:
+            filters.append(f"crop={nw}:{nh}")
+        if too_short:
+            filters.append(f"tpad=stop_mode=clone:stop_duration={seconds - duration:.3f}")
+        tmp = video_path.with_name(video_path.stem + "_conform.mp4")
+        args = ["-i", str(video_path)]
+        if filters:
+            args += ["-vf", ",".join(filters)]
+        args += ["-t", f"{seconds:.3f}", "-an", "-c:v", "libx264", "-crf", "17",
+                 "-preset", "veryfast", "-pix_fmt", "yuv420p", str(tmp)]
+        run_ffmpeg(args)
+        tmp.replace(video_path)
+        return True
+
+    @staticmethod
     def interpolate_motion_60fps(video_path: Path, out_path: Path) -> Path:
         """Silky smooth 60fps motion interpolation via ffmpeg minterpolate."""
         vf = "minterpolate='fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'"
@@ -1813,12 +2235,22 @@ class VideoEngine:
         )
 
     @staticmethod
-    def upscale_video(video_path: Path, target_quality: str, out_path: Path) -> Path:
-        """Upscales video to 720p / 1080p / 4K using Lanczos, preserving aspect ratio."""
+    def upscale_video(video_path: Path, target_quality: str, out_path: Path,
+                      aspect_ratio: Optional[str] = None) -> Path:
+        """Upscales video to 720p / 1080p / 4K using Lanczos.
+
+        With ``aspect_ratio`` the result is the exact standard frame for that
+        shape (e.g. 1920x1080 or 1080x1920), filling and centre-cropping the
+        few pixels by which model buckets differ from the true ratio.
+        """
         scale_filter = VideoEngine.upscale_filter(target_quality)
         if not scale_filter:
             shutil.copyfile(video_path, out_path)
             return out_path
+        if aspect_ratio:
+            tw, th = output_size(aspect_ratio, VideoEngine.UPSCALE_SHORT_EDGE[target_quality])
+            scale_filter = (f"scale={tw}:{th}:force_original_aspect_ratio=increase:flags=lanczos,"
+                            f"crop={tw}:{th},setsar=1")
 
         vf = f"{scale_filter},unsharp=5:5:0.8:5:5:0.0"
         run_ffmpeg(["-i", str(video_path), "-vf", vf, "-map", "0:v:0", "-map", "0:a?",
@@ -1867,6 +2299,7 @@ class JobSettings:
     fps: int = 30
     language: str = "English"
     voice_gender: str = "Male"
+    use_my_voice: bool = False                 # narrate with the saved voice sample
     voice_script: str = ""
     music_mood: str = "Ambient"
     subtitles_enabled: bool = True
@@ -2262,11 +2695,13 @@ class JobQueue:
 class VideoStudio:
     """Master Unified VideoStudio Suite."""
 
+    BACKEND_NAMES = ("colab", "ltx23", "wan22", "ltx", "cogvideox", "test_pattern")
+
     def __init__(self, config: Optional[StudioConfig] = None):
         self.config = config or StudioConfig.load()
         self.probe = HardwareProbe()
         self.prompt_engine = PromptEngine()
-        self.audio_engine = AudioEngine()
+        self.audio_engine = AudioEngine(self.config)
         self.media_fetcher = MediaFetcher(self.config)
         self.video_engine = VideoEngine()
         self.subtitle_engine = SubtitleEngine()
@@ -2275,9 +2710,10 @@ class VideoStudio:
         # interrupted jobs on construction and immediately needs self.backends.
         self.backends: Dict[str, GenerationBackend] = {
             "colab": ColabBackend(self.config),
+            "ltx23": LTX23Backend(self.config),
+            "wan22": Wan22Backend(self.config),
             "ltx": LTXSpaceBackend(self.config),
             "cogvideox": CogVideoXBackend(self.config),
-            "wan_official": WanOfficialBackend(self.config),
             "test_pattern": TestPatternBackend(),
         }
         self._prune_outputs()
@@ -2320,11 +2756,18 @@ class VideoStudio:
         final_video_out.parent.mkdir(parents=True, exist_ok=True)
 
         log.info("Starting Job [%s] Mode: %s", sett.job_id, sett.mode)
+        self.audio_engine.voice_note = ""
 
         if sett.mode == "script_story":
             self._execute_script_mode(sett, job_dir, final_video_out, progress_cb)
         else:
             self._execute_ai_diffusion_mode(sett, job_dir, final_video_out, progress_cb)
+
+    def _voice_note(self, sett: JobSettings) -> str:
+        """Sentence for the result card when 'My voice' was asked for but a
+        standard voice had to be used."""
+        note = self.audio_engine.voice_note if sett.use_my_voice else ""
+        return f" Your own voice was not used: {note}." if note else ""
 
     def _execute_ai_diffusion_mode(self, sett: JobSettings, job_dir: Path, out_mp4: Path, progress_cb: Callable):
         if self.queue.is_cancelled(sett.job_id):
@@ -2344,6 +2787,8 @@ class VideoStudio:
         clips: List[Path] = []
         last_frame_path: Optional[str] = None
         backend_used = "unknown"
+        used_token_fallback = False
+        fallback_asset: Optional[Tuple[str, str]] = None
         # Generate at the models' native 16 fps and derive frame COUNT from the
         # requested seconds — the old code left num_frames at the 81 default so
         # every clip came out a fixed (often wrong) length regardless of the
@@ -2392,6 +2837,7 @@ class VideoStudio:
             success = False
             quota_hint = 0
             transient = False
+            needs_token = False
             for b_name in self.config.backend_order:
                 if self.queue.is_cancelled(sett.job_id):
                     return
@@ -2400,15 +2846,16 @@ class VideoStudio:
                 if b_name == "test_pattern" and not self.config.allow_test_pattern_fallback:
                     continue
                 be = self.backends.get(b_name)
-                if not be or not be.available():
+                if not be or not be.available() or not be.supports(req):
                     continue
                 try:
-                    be.generate(req, clip_out)
+                    be.generate(req, clip_out, lambda m, _p=chunk_prog: progress_cb(sett.job_id, Stage.GENERATING, _p, m))
                     backend_used = be.name
                     success = True
                     break
                 except QuotaExhausted as q:
                     quota_hint = max(quota_hint, int(q.wait_seconds))
+                    needs_token = needs_token or quota_needs_token(str(q))
                     log.warning("Backend %s quota-limited: %s", b_name, q)
                 except Exception as e:
                     msg = str(e)
@@ -2417,6 +2864,7 @@ class VideoStudio:
                     wait_s = quota_wait_seconds(msg)
                     if wait_s:
                         quota_hint = max(quota_hint, wait_s)
+                        needs_token = needs_token or quota_needs_token(msg)
                     elif is_transient_error(msg):
                         transient = True
                     log.warning("Backend %s failed: %s", b_name, e)
@@ -2426,7 +2874,16 @@ class VideoStudio:
             # stock footage. Finished chunks are kept on disk (checkpoint reuse),
             # so the resume costs no extra GPU. Only a genuine backend outage
             # (below) falls through to the cinematic-synthesis fallback.
-            if not success and (quota_hint or transient):
+            #
+            # Exception: with no Hugging Face token saved, the anonymous quota
+            # is smaller than one generation, so the Spaces answer "sign in"
+            # forever. Waiting hours for that cannot work; make the picture-
+            # based video now and tell the user how to unlock real AI video.
+            no_token_dead_end = not success and bool(quota_hint) and needs_token and not self.config.hf_token.strip()
+            if no_token_dead_end and not transient:
+                log.warning("Free GPU quota needs a Hugging Face token; using the picture-based fallback.")
+                used_token_fallback = True
+            elif not success and (quota_hint or transient):
                 raise QuotaExhausted(
                     min(quota_hint or 300, self.config.quota_wait_cap_min * 60),
                     reason="Free GPU quota busy" if quota_hint else "Network unavailable",
@@ -2436,9 +2893,13 @@ class VideoStudio:
                 # Intelligent visual asset & Ken Burns 3D motion synthesis fallback
                 log.info("Engaging cinematic visual synthesis fallback for chunk %d...", idx)
                 chunk_dur = chunk_secs     # match the AI chunk length so total duration is right
+                # Search with the user's own words: stock sites and Wikimedia
+                # find nothing for a 60-word styled prompt.
                 asset_path, media_type = self.media_fetcher.fetch_scene_visual(
-                    req.prompt, req.width, req.height, prefer_video=True, style=sett.style_preset
+                    sett.prompt, req.width, req.height, prefer_video=True, style=sett.style_preset,
+                    previous=fallback_asset,
                 )
+                fallback_asset = (asset_path, media_type)
                 if media_type == "image":
                     motions = ["zoom_in", "zoom_out", "pan_left", "pan_right"]
                     mot = motions[idx % len(motions)]
@@ -2452,6 +2913,12 @@ class VideoStudio:
                     ])
                 backend_used = "cinematic_synthesis"
                 success = True
+            else:
+                # AI clips come back in each model's native shape/length.
+                try:
+                    self.video_engine.conform_clip(clip_out, req.width, req.height, chunk_secs)
+                except FFmpegError as exc:
+                    log.warning("Clip conform skipped for chunk %d: %s", idx, exc)
 
             clips.append(clip_out)
 
@@ -2492,7 +2959,7 @@ class VideoStudio:
             progress_cb(sett.job_id, Stage.UPSCALING, 0.80, f"Upscaling to {sett.quality}...")
             upscaled = job_dir / f"upscaled_{sett.quality}.mp4"
             if not (upscaled.exists() and ffprobe_duration(upscaled) > 0.5):
-                self.video_engine.upscale_video(current_vid, sett.quality, upscaled)
+                self.video_engine.upscale_video(current_vid, sett.quality, upscaled, sett.aspect_ratio)
                 current_vid = upscaled
             else:
                 current_vid = upscaled
@@ -2506,9 +2973,12 @@ class VideoStudio:
         vo_file: Optional[Path] = None
         events: List[dict] = []
         if vo_text:     # no narration typed -> music only (the prompt is not read aloud)
-            vo_file, events = self.audio_engine.generate_voiceover(vo_text, sett.language, sett.voice_gender)
+            vo_file, events = self.audio_engine.generate_voiceover(
+                vo_text, sett.language, sett.voice_gender, my_voice=sett.use_my_voice)
         video_dur = ffprobe_duration(current_vid)
         vo_dur = ffprobe_duration(vo_file) if vo_file and Path(vo_file).exists() else 0.0
+        if vo_text and not events:
+            events = estimate_word_events(vo_text, vo_dur)
         # If the narration runs longer than the footage, hold the last frame so
         # nothing gets cut off (instead of muxing a long audio track onto a short
         # video and leaving them mismatched).
@@ -2550,8 +3020,16 @@ class VideoStudio:
         thumb = job_dir / "thumb.jpg"
         run_ffmpeg(["-ss", "0.5", "-i", str(out_mp4), "-vframes", "1", "-q:v", "2", str(thumb)])
 
+        if used_token_fallback:
+            done_msg = ("Made from pictures with camera motion, because the free AI video quota "
+                        "needs a free Hugging Face token. Add one in Settings for real AI video.")
+        elif backend_used == "cinematic_synthesis":
+            done_msg = "Made from pictures with camera motion (the free AI video services were unavailable)."
+        else:
+            done_msg = "Video generated successfully!"
+        done_msg += self._voice_note(sett)
         progress_cb(
-            sett.job_id, Stage.DONE, 1.0, "Video generated successfully!",
+            sett.job_id, Stage.DONE, 1.0, done_msg,
             video_path=str(out_mp4),
             srt_path=str(srt_file),
             thumbnail_path=str(thumb),
@@ -2566,7 +3044,7 @@ class VideoStudio:
         progress_cb(sett.job_id, Stage.ENHANCING, 0.10, "Parsing multi-scene script...")
         script = sett.script_text.strip()
         if not script:
-            script = FreeLLMPromptEnhancer.generate_script(sett.prompt, scene_count=4, language=sett.language)
+            script = FreeLLMPromptEnhancer.generate_script(sett.prompt, 4, sett.language, self.config)
 
         scenes = self._parse_script_scenes(script)
         if not scenes:
@@ -2585,6 +3063,7 @@ class VideoStudio:
         slots: List[float] = []
         current_offset = 0.0
         n_scenes = len(scenes)
+        previous_asset: Optional[Tuple[str, str]] = None
 
         for s_idx, (vis_prompt, vo_prompt) in enumerate(scenes):
             if self.queue.is_cancelled(sett.job_id):
@@ -2624,11 +3103,14 @@ class VideoStudio:
             progress_cb(sett.job_id, Stage.GENERATING, prog, f"Processing scene {s_idx+1}/{len(scenes)}...")
 
             # Audio VO for scene
-            vo_path_gen, events = self.audio_engine.generate_voiceover(vo_prompt, sett.language, sett.voice_gender)
+            vo_path_gen, events = self.audio_engine.generate_voiceover(
+                vo_prompt, sett.language, sett.voice_gender, my_voice=sett.use_my_voice)
             if vo_path_gen.exists():
                 shutil.copyfile(vo_path_gen, vo_path)
             vo_dur = ffprobe_duration(vo_path)
             scene_dur = scene_video_seconds(vo_dur)
+            if not events:
+                events = estimate_word_events(vo_prompt, vo_dur)
 
             # Adjust event offsets for full video timeline
             for ev in events:
@@ -2640,7 +3122,9 @@ class VideoStudio:
             vo_files.append(vo_path)
 
             # Fetch visual asset
-            asset_path, media_type = self.media_fetcher.fetch_scene_visual(vis_prompt, w, h, prefer_video=True, style=sett.style_preset)
+            asset_path, media_type = self.media_fetcher.fetch_scene_visual(
+                vis_prompt, w, h, prefer_video=True, style=sett.style_preset, previous=previous_asset)
+            previous_asset = (asset_path, media_type)
 
             # Build Scene Video
             if media_type == "image":
@@ -2718,7 +3202,7 @@ class VideoStudio:
         run_ffmpeg(["-ss", "0.5", "-i", str(out_mp4), "-vframes", "1", "-q:v", "2", str(thumb)])
 
         progress_cb(
-            sett.job_id, Stage.DONE, 1.0, "Storyboard video generated successfully!",
+            sett.job_id, Stage.DONE, 1.0, "Storyboard video generated successfully!" + self._voice_note(sett),
             video_path=str(out_mp4),
             srt_path=str(srt_file),
             thumbnail_path=str(thumb),

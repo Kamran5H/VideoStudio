@@ -1,6 +1,6 @@
 [project]
 name = "videostudio"
-version = "3.1.0"
+version = "3.2.0"
 description = "Local Gradio studio for AI text/image-to-video and narrated storyboard videos"
 requires-python = ">=3.10"
 license = { text = "MIT" }

@@ -13,6 +13,12 @@ If Not fso.FileExists(appDir & "\app.py") Then
     WScript.Quit 1
 End If
 
+' First run (or the icon was deleted): put the shortcut on the desktop.
+If Not fso.FileExists(WshShell.SpecialFolders("Desktop") & "\VideoStudio.lnk") _
+   And fso.FileExists(appDir & "\Install Desktop Shortcut.vbs") Then
+  WshShell.Run "wscript //nologo " & q & appDir & "\Install Desktop Shortcut.vbs" & q & " /quiet", 0, False
+End If
+
 logPath = appDir & "\outputs\logs\launch.log"
 WshShell.CurrentDirectory = appDir
 
