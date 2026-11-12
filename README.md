@@ -16,11 +16,14 @@
 ## Using it (no experience needed)
 
 1. Double-click **VideoStudio** on your desktop (or run `python app.py`). Your browser opens the studio.
+   No desktop icon yet? Double-click **`Install Desktop Shortcut.vbs`** in the VideoStudio folder once.
 2. **🎬 Quick clip:** describe what the video should show, pick a shape (Wide, Tall or Square) and a length, then press **Make my video**.
    **📖 Story video:** type a topic, press **Write the script for me** (or paste your own), then press **Make my video**.
 3. Watch the status card. When it says ✅ Completed, use the ⬇ button on the player to download.
 
-Voice language, music, subtitles, quality and visual style are under **More options**. API keys are optional and go in **⚙️ Settings**.
+Voice language, music, subtitles, quality and visual style are under **More options**. API keys are optional and go in **⚙️ Settings**. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
+
+> **Everything here is free, but real AI video needs one free thing:** a Hugging Face account token. Hugging Face refuses GPU jobs from visitors who are not signed in, so without a token **Quick clip** makes its video from AI pictures with camera motion instead (and tells you so). Create a free account at huggingface.co, open *Settings → Access Tokens*, make a **Read** token and paste it into **⚙️ Settings**. A free account gets a few minutes of GPU time per day, which is a handful of 5-second clips.
 
 ## What happens behind the button
 
@@ -30,14 +33,17 @@ VideoStudio runs on your computer, but the heavy diffusion work is sent to free 
 1. **Prompt enhancement.** Gemini (if you set a key) rewrites the prompt. If not, a free Pollinations text model does it, and an offline style template is the last fallback.
 2. **Generation in 5-second chunks.** Each chunk is chained to the next through its last frame. Backends are tried in order:
    - your own **Colab T4 worker** running Wan2.1-T2V-1.3B ([`colab_worker.ipynb`](colab_worker.ipynb))
-   - **LTX-Video** (HF ZeroGPU Space, also supports image-to-video)
-   - **CogVideoX-5B** (HF Space)
-   - the public **Wan2.1-14B** Space queue
-3. **When free GPU quota runs out**, the job waits and resumes by itself. Finished chunks are checkpointed to disk, so nothing is re-generated. If every backend is genuinely down, the studio uses stock footage or an AI still image with **Ken Burns** motion instead.
-4. **Post-processing with FFmpeg:** crossfades and an aspect-preserving Lanczos **upscale** to 720p, 1080p or 4K.
+   - **LTX-2.3** (official `Lightricks/LTX-2-3` Space; continues each chunk from the last frame)
+   - **Wan 2.2 14B** with the 4-step Lightning LoRA (`Upsampler/wan-2-2-14b-text-to-video`; cheapest in GPU time)
+   - **LTX-Video distilled** (`Lightricks/ltx-video-distilled`)
+   - **CogVideoX-5B** (`zai-org/CogVideoX-5B-Space`; wide and square only, it always renders 720x480)
+
+   Every call is built from the signature each Space publishes, and each returned clip is cropped to the requested shape and cut to the requested length, because the models return their own native sizes and durations.
+3. **When free GPU quota runs out** and a token is saved, the job waits and resumes by itself. Finished chunks are checkpointed to disk, so nothing is re-generated. With no token (waiting would never help), or if every backend is genuinely down, the studio uses stock footage or an AI still image with **Ken Burns** motion instead.
+4. **Post-processing with FFmpeg:** crossfades and a Lanczos **upscale** to the exact standard frame: 1920x1080, 1080x1920 or 1080x1080 (and the 720p / 4K equivalents).
 5. **Audio:** if you typed narration, **Edge-TTS** speaks it (gTTS as fallback) in 10 languages with word-timed subtitles. Background music ducks under the voice. With no narration, the clip gets music only.
 
-**📖 Story video** (script-to-video). You write, or have Gemini draft, `Visual:` / `VO:` lines. Each scene gets:
+**📖 Story video** (script-to-video). You write `Visual:` / `VO:` lines, or have them drafted for you (Gemini if you set a key, otherwise a free Pollinations text model, otherwise an offline template). Each scene gets:
 - a stock clip from Pexels or Pixabay, or a still image from Wikimedia or Pollinations, animated with Ken Burns motion
 - its own narration
 
@@ -54,7 +60,7 @@ Narration and subtitles are timed to each scene's on-screen slot, so they stay i
 | Variable | Used for |
 |---|---|
 | `GEMINI_API_KEY` | Prompt enhancement and storyboard scripts (`GEMINI_MODELS` sets the model order) |
-| `HF_TOKEN` | Higher ZeroGPU quota on the Hugging Face Spaces |
+| `HF_TOKEN` | **Needed for real AI video.** Free Hugging Face token (Read); anonymous visitors get no usable ZeroGPU quota |
 | `PEXELS_API_KEY`, `PIXABAY_API_KEY` | Stock footage and photos |
 | `VIDEOSTUDIO_OUTPUT_DIR` | Where renders go (keep it **outside OneDrive**: sync locks files mid-encode) |
 
@@ -72,7 +78,7 @@ copy .env.example .env          # optional; macOS/Linux: cp
 python app.py                   # opens http://127.0.0.1:7860
 ```
 
-On Windows, `run_videostudio.vbs` starts the studio silently in the background and opens the browser. Point a desktop shortcut at `wscript.exe "<repo>\run_videostudio.vbs"` with `videostudio.ico` as its icon. `Start Video Studio.bat` does the same in a visible console window, which is handy for seeing errors. `python video_studio.py --probe` prints hardware and backend diagnostics.
+On Windows, `run_videostudio.vbs` starts the studio silently in the background (no console window) and opens the browser. `Install Desktop Shortcut.vbs` creates the **VideoStudio** desktop icon for it and repairs older VideoStudio shortcuts after the folder is moved; the launcher also recreates the icon if it is missing. `Start Video Studio.bat` does the same in a visible console window, which is handy for seeing errors. `python video_studio.py --probe` prints hardware and backend diagnostics.
 
 ### Optional: free Colab GPU worker
 1. Open [`colab_worker.ipynb`](colab_worker.ipynb) in Google Colab.
@@ -102,7 +108,8 @@ video_studio.py        Pipeline: backends, media fetch, TTS, subtitles, FFmpeg e
 colab_worker.ipynb     Free Colab GPU worker exposing /generate for Wan2.1-T2V-1.3B
 tests/                 Offline unit and FFmpeg regression tests
 Wan2.1-main/           Unmodified upstream Wan2.1 reference copy (Apache-2.0); not imported by the app
-Start Video Studio.bat / run_videostudio.vbs   Windows launchers
+Start Video Studio.bat / run_videostudio.vbs   Windows launchers (visible console / silent)
+Install Desktop Shortcut.vbs                   Creates or repairs the desktop icon
 ```
 
 ---

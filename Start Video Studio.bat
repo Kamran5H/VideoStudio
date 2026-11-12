@@ -11,6 +11,9 @@ rem --- prefer the project's virtual environment, then use system Python ---
 set "PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
+rem --- keep the desktop shortcut pointing at this folder ---
+if exist "%~dp0Install Desktop Shortcut.vbs" wscript //nologo "%~dp0Install Desktop Shortcut.vbs" /quiet
+
 rem --- already running? just open the browser and exit ---
 curl -s -o nul -m 2 http://127.0.0.1:7860/ >nul 2>&1
 if not errorlevel 1 (

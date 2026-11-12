@@ -16,6 +16,8 @@ os.environ.setdefault("VIDEOSTUDIO_OUTPUT_DIR", tempfile.mkdtemp(prefix="vs_test
 
 import video_studio as vs  # noqa: E402  (env var must be set before import)
 
+vs.SCRIPT_RETRY_PAUSE = 0.0      # no real waiting between retries in tests
+
 TEMPLATE_SCRIPT = (
     "Visual: aerial pyramids golden hour sunrise\n"
     "VO: For five thousand years, the pyramids guarded secrets.\n"
@@ -56,14 +58,19 @@ class ScriptParserTests(unittest.TestCase):
         self.assertEqual(scenes, [("forest at dawn", "Light returns to the valley."), ("river", "river")])
 
     def test_generated_fallback_script_parses_into_scenes(self):
-        script = vs.FreeLLMPromptEnhancer.generate_script("Oceans", 4, "English", vs.StudioConfig(gemini_api_key=""))
-        with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
-            self.assertGreaterEqual(len(self.studio._parse_script_scenes(script)), 2)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), patch("requests.get", side_effect=OSError("offline")):
+            script = vs.FreeLLMPromptEnhancer.generate_script("Oceans", 4, "English",
+                                                               vs.StudioConfig(gemini_api_key=""))
+        self.assertEqual(len(self.studio._parse_script_scenes(script)), 4)
 
 
 class PureHelperTests(unittest.TestCase):
     def test_output_size_keeps_aspect_and_even_dims(self):
-        self.assertEqual(vs.output_size("16:9"), (1872, 1080))   # from the 832x480 bucket
+        self.assertEqual(vs.output_size("16:9"), (1920, 1080))
+        self.assertEqual(vs.output_size("9:16"), (1080, 1920))
+        self.assertEqual(vs.output_size("1:1"), (1080, 1080))
+        self.assertEqual(vs.output_size("16:9", 2160), (3840, 2160))
+        self.assertEqual(vs.output_size("nonsense"), (1920, 1080))
         w, h = vs.output_size("9:16")
         self.assertGreater(h, w)
         self.assertEqual(w, 1080)
@@ -129,7 +136,8 @@ class PureHelperTests(unittest.TestCase):
                 self.models = FakeModels()
 
         cfg = vs.StudioConfig(gemini_api_key="k")
-        with patch("google.genai.Client", FakeClient, create=True):
+        with patch("google.genai.Client", FakeClient, create=True), \
+                patch("requests.get", side_effect=OSError("offline")):
             try:
                 vs.FreeLLMPromptEnhancer.generate_script("Oceans", 2, "Urdu", cfg)
             except Exception:
@@ -328,6 +336,222 @@ class ConfigCompatTests(unittest.TestCase):
             self.assertNotIn("wan_cooldown_hours", path.read_text(encoding="utf-8"))
 
 
+    def test_saved_backend_order_from_an_older_version_is_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "studio_config.json"
+            path.write_text(
+                '{"backend_order": ["colab", "ltx", "cogvideox", "wan_official", "veo3_free", "test_pattern"]}',
+                encoding="utf-8",
+            )
+            order = vs.StudioConfig.load(path).backend_order
+        self.assertEqual(order, ["colab", "ltx23", "wan22", "ltx", "cogvideox", "test_pattern"])
+        self.assertEqual(set(order), set(object.__new__(vs.VideoStudio).__class__.BACKEND_NAMES))
+
+
+LIVE_QUOTA_ERRORS = (
+    # Both copied verbatim from the live Spaces.
+    "You have exceeded your ZeroGPU quota (120s requested vs. -60s left). Try again in 0:00:00. "
+    "Authenticate with a Hugging Face token for more quota - https://huggingface.co/settings/tokens",
+    "You have exceeded your ZeroGPU runs limit. Authenticate with a Hugging Face token for more quota "
+    "- https://huggingface.co/settings/tokens",
+)
+
+
+class QuotaTests(unittest.TestCase):
+    def test_both_live_quota_wordings_are_recognised(self):
+        for text in LIVE_QUOTA_ERRORS:
+            self.assertGreaterEqual(vs.quota_wait_seconds(text) or 0, 60, text)
+            self.assertTrue(vs.quota_needs_token(text), text)
+        self.assertIsNone(vs.quota_wait_seconds("CUDA out of memory"))
+        signed_in = "You have exceeded your ZeroGPU quota (75s requested vs. 10s left). Try again in 1:30:00."
+        self.assertEqual(vs.quota_wait_seconds(signed_in), 5420)
+        self.assertFalse(vs.quota_needs_token(signed_in))
+
+    def _run(self, hf_token, error):
+        studio = object.__new__(vs.VideoStudio)
+        studio.config = vs.StudioConfig(backend_order=["a"], hf_token=hf_token)
+
+        class Limited(vs.GenerationBackend):
+            name = "a"
+
+            def generate(self, req, out_path, progress=lambda m: None):
+                raise RuntimeError(error)
+
+        studio.backends = {"a": Limited()}
+
+        class Q:
+            def is_cancelled(self, _):
+                return False
+
+        class Fetcher:
+            calls = 0
+
+            def fetch_scene_visual(self, *a, **k):
+                Fetcher.calls += 1
+                raise RuntimeError("fallback reached")
+
+        studio.queue = Q()
+        studio.video_engine = vs.VideoEngine()
+        studio.media_fetcher = Fetcher()
+        sett = vs.JobSettings(prompt="p", duration=5.0)
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(vs.FreeLLMPromptEnhancer, "expand_with_ai", return_value="p"), \
+                patch.object(vs, "ffprobe_duration", return_value=0.0):
+            studio._execute_ai_diffusion_mode(sett, Path(tmp), Path(tmp) / "o.mp4", lambda *a, **k: None)
+
+    def test_without_a_token_the_job_does_not_wait_for_quota_that_never_comes(self):
+        with patch.dict(os.environ, {"HF_TOKEN": "", "HUGGINGFACE_TOKEN": ""}):
+            with self.assertRaisesRegex(RuntimeError, "fallback reached"):
+                self._run("", LIVE_QUOTA_ERRORS[0])
+
+    def test_with_a_token_a_quota_error_defers_the_job(self):
+        with self.assertRaises(vs.QuotaExhausted):
+            self._run("hf_x", LIVE_QUOTA_ERRORS[0])
+
+
+class FakeSpaceClient:
+    """Stands in for gradio_client.Client with a Space's real signature."""
+
+    def __init__(self, api_name, params, result="/tmp/does-not-matter.mp4", error=None):
+        self.api_name, self.params, self.result, self.error = api_name, params, result, error
+        self.sent = None
+
+    def view_api(self, return_format="dict", print_info=False):
+        return {"named_endpoints": {self.api_name: {"parameters": [
+            {"parameter_name": n, "python_type": {"type": t}} for n, t in self.params]}}}
+
+    def submit(self, *args, api_name=None, **kwargs):
+        self.sent = (api_name, kwargs)
+        client = self
+
+        class Job:
+            def result(self, timeout=None):
+                if client.error:
+                    raise RuntimeError(client.error)
+                return (client.result, 7)
+
+        return Job()
+
+
+class SpaceBackendTests(unittest.TestCase):
+    """Payloads must match the signatures published by each Space's app.py."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="vs_space_"))
+        self.clip = self.tmp / "remote.mp4"
+        self.clip.write_bytes(b"video")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_ltx23_payload_matches_the_space(self):
+        be = vs.LTX23Backend(vs.StudioConfig())
+        be._client = FakeSpaceClient("/generate_video", [
+            ("input_image", "dict"), ("prompt", "str"), ("duration", "float"), ("enhance_prompt", "bool"),
+            ("seed", "float"), ("randomize_seed", "bool"), ("height", "int"), ("width", "int")], str(self.clip))
+        req = vs.GenerationRequest(prompt="boat", width=480, height=832, num_frames=vs.frames_for(5.0), seed=3)
+        out = be.generate(req, self.tmp / "out.mp4")
+        api, sent = be._client.sent
+        self.assertEqual(api, "/generate_video")
+        self.assertEqual((sent["width"], sent["height"]), (1024, 1536))
+        self.assertEqual((sent["prompt"], sent["seed"], sent["randomize_seed"], sent["input_image"]),
+                         ("boat", 3, False, None))
+        self.assertAlmostEqual(sent["duration"], 5.1, places=1)
+        self.assertEqual(out.read_bytes(), b"video")
+
+    def test_wan22_uses_the_aspect_label_the_space_publishes(self):
+        be = vs.Wan22Backend(vs.StudioConfig())
+        be._client = FakeSpaceClient("/generate_video", [
+            ("prompt", "str"), ("aspect_ratio", "Literal['16:9 (832x480)', '9:16 (480x832) HD', '1:1 (640x640)']"),
+            ("steps", "float"), ("negative_prompt", "str"), ("duration_seconds", "float"),
+            ("guidance_scale", "float"), ("seed", "float"), ("randomize_seed", "bool")], str(self.clip))
+        req = vs.GenerationRequest(prompt="boat", width=480, height=832, num_frames=vs.frames_for(9.0), seed=-1)
+        be.generate(req, self.tmp / "out.mp4")
+        _, sent = be._client.sent
+        self.assertEqual(sent["aspect_ratio"], "9:16 (480x832) HD")
+        self.assertEqual((sent["duration_seconds"], sent["steps"], sent["randomize_seed"]), (5.0, 4, True))
+        self.assertNotIn("guidance_scale_2", sent)       # dropped: this Space build does not accept it
+
+    def test_quota_error_becomes_quota_exhausted_that_asks_for_a_token(self):
+        be = vs.LTX23Backend(vs.StudioConfig())
+        be._client = FakeSpaceClient("/generate_video", [("prompt", "str")], error=LIVE_QUOTA_ERRORS[1])
+        with self.assertRaises(vs.QuotaExhausted) as ctx:
+            be.generate(vs.GenerationRequest(prompt="boat"), self.tmp / "out.mp4")
+        self.assertTrue(vs.quota_needs_token(str(ctx.exception)))
+
+    def test_cogvideox_is_skipped_for_tall_videos(self):
+        be = vs.CogVideoXBackend(vs.StudioConfig())
+        self.assertEqual(be.SPACE, "zai-org/CogVideoX-5B-Space")
+        self.assertTrue(be.supports(vs.GenerationRequest(prompt="p", width=832, height=480)))
+        self.assertFalse(be.supports(vs.GenerationRequest(prompt="p", width=480, height=832)))
+
+
+class CaptionAndVisualFallbackTests(unittest.TestCase):
+    def test_backup_voice_still_gets_timed_captions(self):
+        events = vs.estimate_word_events("A small paper boat begins its journey.", 4.0)
+        self.assertEqual([e["text"] for e in events][:3], ["A", "small", "paper"])
+        self.assertEqual(events[0]["offset"], 0.0)
+        ends = [e["offset"] + e["duration"] for e in events]
+        self.assertTrue(all(b >= a for a, b in zip(ends, ends[1:], strict=False)))
+        self.assertLessEqual(ends[-1], 4.0)
+        self.assertEqual(vs.estimate_word_events("", 4.0), [])
+        self.assertEqual(vs.estimate_word_events("hello", 0.0), [])
+
+    def test_failed_fetch_reuses_previous_visual_not_an_unrelated_placeholder(self):
+        fetcher = vs.MediaFetcher(vs.StudioConfig(pexels_api_key="", pixabay_api_key=""))
+        with tempfile.TemporaryDirectory() as tmp:
+            prev = Path(tmp) / "ocean.jpg"
+            prev.write_bytes(b"x")
+            with patch.object(fetcher, "_search_wikimedia", return_value=None), \
+                    patch.object(fetcher, "_generate_pollinations_image", return_value=None):
+                self.assertEqual(fetcher.fetch_scene_visual("salt crystals", previous=(str(prev), "image")),
+                                 (str(prev), "image"))
+                made, kind = fetcher.fetch_scene_visual("salt crystals")
+            self.assertEqual(kind, "image")
+            self.assertNotIn("test_diag", made)
+
+    def test_pollinations_retries_and_does_not_style_a_styled_prompt_twice(self):
+        fetcher = vs.MediaFetcher(vs.StudioConfig())
+        urls = []
+
+        def fake_download(url, out, **kwargs):
+            urls.append(url)
+            return str(out) if len(urls) == 2 else None
+
+        styled = vs.PromptEngine().enhance("a boat", preset="Cinematic")
+        with patch.object(vs.MediaFetcher, "POLLINATIONS_RETRY_PAUSES", (0, 0, 0)), \
+                patch.object(vs.MediaFetcher, "_download", side_effect=fake_download):
+            self.assertTrue(fetcher._generate_pollinations_image(styled, 832, 480, "Cinematic"))
+        self.assertEqual(len(urls), 2)
+        self.assertEqual(urls[0].count("Cinematic%2035mm%20film%20still"), 1)
+
+
+class ScriptWriterTests(unittest.TestCase):
+    def test_offline_template_honours_scene_count(self):
+        studio = object.__new__(vs.VideoStudio)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), \
+                patch("requests.get", side_effect=OSError("offline")):
+            for count in (1, 2, 3, 6):
+                script = vs.FreeLLMPromptEnhancer.generate_script("Oceans", count, "English",
+                                                                   vs.StudioConfig(gemini_api_key=""))
+                self.assertEqual(len(studio._parse_script_scenes(script)), count)
+
+    def test_free_text_model_writes_the_script_when_there_is_no_gemini_key(self):
+        class Resp:
+            status_code = 200
+            text = "Visual: waves rocks\nVO: سمندر نمکین ہے۔\n\nVisual: river sea\nVO: دریا نمک لاتے ہیں۔"
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": ""}), patch("requests.get", return_value=Resp()) as get:
+            script = vs.FreeLLMPromptEnhancer.generate_script("Oceans", 2, "Urdu", vs.StudioConfig(gemini_api_key=""))
+        self.assertEqual(script, Resp.text)
+        self.assertIn("Urdu", get.call_args[0][0].replace("%20", " "))
+
+    def test_error_pages_are_not_accepted_as_scripts(self):
+        self.assertFalse(vs.looks_like_script("<html>502 Bad Gateway</html>"))
+        self.assertFalse(vs.looks_like_script("Sorry, rate limit reached."))
+        self.assertTrue(vs.looks_like_script("**Visual:** sea\n**VO:** Salt."))
+
+
 class HFClientTests(unittest.TestCase):
     def test_token_is_passed_with_the_keyword_the_client_accepts(self):
         try:
@@ -432,6 +656,31 @@ class FFmpegPipelineTests(unittest.TestCase):
         vs.VideoEngine.crossfade_concat([a, b], out, crossfade=0.3)
         self.assertEqual(vs.probe_video_size(out), (832, 480))
         self.assertGreater(vs.ffprobe_duration(out), 1.8)
+
+    def test_upscale_gives_exact_standard_frames(self):
+        for (w, h), aspect, want in (((832, 480), "16:9", (1920, 1080)), ((480, 832), "9:16", (1080, 1920)),
+                                     ((1536, 1024), "16:9", (1920, 1080)), ((624, 624), "1:1", (1080, 1080))):
+            src = self._clip(f"s{w}x{h}.mp4", w, h, dur=0.5)
+            out = self.tmp / f"up{w}x{h}.mp4"
+            vs.VideoEngine.upscale_video(src, "1080p", out, aspect)
+            self.assertEqual(vs.probe_video_size(out), want)
+
+    def test_conform_crops_trims_and_drops_audio(self):
+        # CogVideoX-like clip (720x480, too long, with sound) asked to be square 2 s.
+        clip = self._clip("cog.mp4", 720, 480, dur=3.0, audio=True)
+        self.assertTrue(vs.VideoEngine.conform_clip(clip, 624, 624, 2.0))
+        self.assertEqual(vs.probe_video_size(clip), (480, 480))
+        self.assertAlmostEqual(vs.ffprobe_duration(clip), 2.0, delta=0.15)
+        self.assertNotIn("Audio:", vs._ffmpeg_info(clip))
+
+    def test_conform_extends_a_short_clip_and_leaves_a_matching_one_alone(self):
+        short = self._clip("wan.mp4", 832, 480, dur=1.0)
+        self.assertTrue(vs.VideoEngine.conform_clip(short, 832, 480, 1.5))
+        self.assertAlmostEqual(vs.ffprobe_duration(short), 1.5, delta=0.15)
+        ok = self._clip("ok.mp4", 832, 480, dur=1.5)
+        before = ok.read_bytes()
+        self.assertFalse(vs.VideoEngine.conform_clip(ok, 832, 480, 1.5))
+        self.assertEqual(ok.read_bytes(), before)
 
     def test_upscale_keeps_portrait_orientation(self):
         src = self._clip("p.mp4", 480, 832, dur=0.5)

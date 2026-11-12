@@ -435,6 +435,18 @@ def stop_job(job_id: str) -> str:
     return "⏹️ Stopping…" if STUDIO.queue.cancel(job_id) else "That video already finished."
 
 
+def turn_off() -> str:
+    """Stop the background server. The desktop shortcut starts it hidden, so
+    this is the only visible way to end it."""
+    def _exit() -> None:
+        STUDIO.queue.shutdown()
+        os._exit(0)
+
+    import threading
+    threading.Timer(1.0, _exit).start()
+    return "👋 VideoStudio is turned off. Close this tab; use the desktop shortcut to start it again."
+
+
 def open_videos_folder() -> None:
     v_dir = DEFAULT_OUTPUT_DIR / "videos"
     v_dir.mkdir(parents=True, exist_ok=True)
@@ -483,17 +495,34 @@ def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: 
 def backend_status_html() -> str:
     labels = {
         "colab": "Your Colab GPU worker",
+        "ltx23": "LTX-2.3 (free cloud)",
+        "wan22": "Wan 2.2 (free cloud)",
         "ltx": "LTX-Video (free cloud)",
-        "cogvideox": "CogVideoX (free cloud)",
-        "wan_official": "Wan 2.1 (free cloud queue)",
+        "cogvideox": "CogVideoX (free cloud, wide and square only)",
     }
+    has_token = bool(STUDIO.config.hf_token.strip())
     rows = []
-    for name, label in labels.items():
+    for name in STUDIO.config.backend_order:
+        label = labels.get(name)
+        if not label:
+            continue
         be = STUDIO.backends.get(name)
         ok = bool(be and be.available())
-        state = "ready" if ok else ("add the Colab URL to use" if name == "colab" else "unavailable")
+        if name == "colab":
+            state = "ready" if ok else "add the Colab URL to use"
+        elif has_token:
+            state = "ready"
+            ok = True
+        else:
+            state = "needs the free Hugging Face token"
+            ok = False
         rows.append(f"{'🟢' if ok else '⚪'} <b>{label}</b> — {state}")
-    return "<div class='q-card'>" + "<br>".join(rows) + "</div>"
+    note = "" if has_token or STUDIO.config.colab_url.strip() else (
+        "<div class='vs-hint' style='margin-top:8px;'>Without a Hugging Face token the free GPUs refuse "
+        "video jobs, so Quick clip uses pictures with camera motion instead. The token is free: create an "
+        "account at huggingface.co, open Settings → Access Tokens, make a <b>Read</b> token and paste it "
+        "on the left.</div>")
+    return "<div class='q-card'>" + "<br>".join(rows) + note + "</div>"
 
 
 def render_queue_table() -> str:
@@ -572,7 +601,8 @@ def build_app() -> gr.Blocks:
                         clip_card = gr.HTML(idle_card("Your video will appear here."))
                         clip_video = gr.Video(label="Your video", interactive=False, height=360)
                         gr.Markdown("<span class='vs-hint'>A 5-second clip usually takes 1–3 minutes. "
-                                    "If the free GPUs are busy, it waits and retries by itself.</span>")
+                                    "Real AI video needs the free Hugging Face token (see Settings); "
+                                    "if the free GPUs are busy, it waits and retries by itself.</span>")
 
                 improve_btn.click(improve_idea, [clip_prompt, clip_style], clip_prompt)
                 clip_make.click(
@@ -628,7 +658,8 @@ def build_app() -> gr.Blocks:
             # ---------------------------------------------------------- Settings
             with gr.Tab("⚙️ Settings", id="settings"):
                 gr.Markdown(
-                    "Everything works **without** these keys. Adding them gives better results. "
+                    "Story video works **without** any key. Real AI video in Quick clip needs the free "
+                    "Hugging Face token; the other keys just give better results. "
                     "Keys are saved only on this computer and are never shown again in this page."
                 )
                 cfg = STUDIO.config
@@ -657,6 +688,8 @@ def build_app() -> gr.Blocks:
                         gr.Markdown("**Recent videos**")
                         queue_box = gr.HTML(render_queue_table())
                         folder_btn = gr.Button("📂 Open my videos folder", variant="secondary")
+                        off_btn = gr.Button("⏻ Turn off VideoStudio", variant="secondary")
+                        off_msg = gr.Markdown()
                         with gr.Accordion("Technical log", open=False):
                             log_box = gr.Textbox(lines=10, interactive=False, show_label=False)
                             gr.Button("Refresh log", size="sm").click(read_system_logs, None, log_box)
@@ -666,6 +699,7 @@ def build_app() -> gr.Blocks:
                     save_api_credentials, [cfg_colab, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini], save_msg,
                 ).then(backend_status_html, None, backend_box)
                 folder_btn.click(open_videos_folder)
+                off_btn.click(turn_off, None, off_msg)
 
         gr.HTML(f"<div id='vs-footer'>{DEVELOPER_ATTRIBUTION} · "
                 "<a href='https://github.com/Kamran5H/VideoStudio' target='_blank'>GitHub</a></div>")
