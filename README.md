@@ -22,6 +22,8 @@
    - **✂️ Edit a video:** add a clip, optionally add a caption, trim it or record your voice, then press **Make my finished video**.
    - **🎬 AI clip:** describe one scene, pick a shape and a length, then press **Make my video**.
 3. Watch the status card. **⏹ Stop this video** appears only while a video is rendering. If a video fails or you stop it, the card stays with the reason and a **🔁 Try again** button that continues from the last finished part.
+Under each result card, **📡 Live activity** shows the job as it happens. A progress bar gives the job's position in the pipeline (not a time guess), and a checklist marks each step (prompt or script, each clip or scene, joining, upscaling, voice & music, subtitles, done). A time-stamped timeline lists everything the job does, newest first: which video service it is trying, Colab render steps, free-quota waits, the visual found for each scene, voice fallbacks, retries and errors. It refreshes every 2 seconds and is kept across restarts.
+
 4. **📁 My videos** lists every finished video with its captions and render report. You can play, download or delete them there, or open the folder.
 
 **🎙️ My voice (optional):** record 10 to 20 seconds of yourself, press **Save my voice**, and the Voice choice under *More options* switches to **My voice**. It is a close likeness, not a perfect copy. It works in English, Hindi, Arabic, Spanish, French, German, Chinese and Japanese (the free cloning model has no Urdu or Punjabi yet), and it needs the same free Hugging Face token as AI video. If My voice cannot be used for a video, you are told why when you press **Make my video**, before anything is queued.

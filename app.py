@@ -14,6 +14,7 @@ from __future__ import annotations
 import html
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -167,6 +168,25 @@ footer { display: none !important; }
   .vs-welcome-card { transition: none; }
   .vs-welcome-card:hover { transform: none; }
 }
+.q-progress-fill { transition: width 0.6s ease; }
+.q-progress-track.is-paused .q-progress-fill { background: linear-gradient(90deg, #f59e0b, #d97706); }
+
+/* Live activity */
+.vs-activity { padding: 4px 2px; }
+.vs-steps { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.vs-step { font-size: 0.8rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border-color-primary);
+           opacity: 0.6; white-space: nowrap; }
+.vs-step.is-done { opacity: 0.9; border-color: #10b981; color: #059669; }
+.vs-step.is-now { opacity: 1; font-weight: 700; border-color: var(--color-accent); background: var(--color-accent-soft); }
+.vs-step.is-failed { opacity: 1; border-color: #ef4444; color: #dc2626; }
+.vs-timeline { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto; font-size: 0.86rem; }
+.vs-timeline li { display: grid; grid-template-columns: 4.6em 1.4em 1fr; gap: 6px; padding: 5px 2px;
+                  border-bottom: 1px solid var(--border-color-primary); overflow-wrap: anywhere; }
+.vs-timeline time { opacity: 0.6; font-variant-numeric: tabular-nums; }
+.vs-timeline li.is-warn { color: #b45309; }
+.vs-timeline li.is-error { color: #dc2626; }
+.vs-timeline li.is-done { color: #059669; font-weight: 600; }
+@media (prefers-color-scheme: dark) { .vs-timeline li.is-warn { color: #fbbf24; } }
 .vs-hint { font-size: 0.86rem; opacity: 0.7; }
 #vs-footer { text-align: center; font-size: 0.85rem; opacity: 0.65; padding: 18px 0 10px; }
 @media (max-width: 640px) { #vs-hero h1 { font-size: 1.3rem; } }
@@ -235,7 +255,10 @@ def queue_wait_label(job: JobStatus, jobs: List[JobStatus], now: Optional[float]
         return ""
     current_time = time.time() if now is None else now
     if job.not_before > current_time:
-        return f"Free GPUs are busy — trying again in {friendly_seconds(int(job.not_before - current_time))}"
+        left = friendly_seconds(int(job.not_before - current_time))
+        if job.wait_kind == "colab":
+            return f"Colab is rendering — next check in {left}"
+        return f"Free GPUs are busy — trying again in {left}"
     ahead = 0
     for previous in jobs:
         if previous.job_id == job.job_id:
@@ -260,6 +283,13 @@ def readable_job_message(job: JobStatus) -> str:
     return job.message
 
 
+WAIT_LABELS = {
+    "colab": "Rendering on your Colab GPU",
+    "quota": "Paused: free GPU time is used up",
+    "retry": "Retrying after a problem",
+}
+
+
 def render_job_card(
     job_id: str,
     prompt: str,
@@ -269,8 +299,13 @@ def render_job_card(
     elapsed: Optional[int] = None,
     wait_label: str = "",
     error: Optional[str] = None,
+    wait_kind: str = "",
 ) -> str:
-    """Status card. Progress is shown as a moving bar, not an invented %."""
+    """Status card with a progress bar.
+
+    The percentage is the job's position in the pipeline (prompt, each clip or
+    scene, joining, upscaling, audio, subtitles), not a time estimate; it only
+    moves when a step really finishes (or a Colab render reports a step)."""
     icon = STAGE_ICONS.get(stage, "•")
     color = "#10B981" if stage == Stage.DONE else "#EF4444" if stage in (Stage.FAILED, Stage.CANCELLED) else "var(--color-accent)"
     is_queued = stage == Stage.QUEUED
@@ -282,17 +317,26 @@ def render_job_card(
         progress_label, progress_value = "Done", "100%"
         progress_class, aria = "q-progress-track is-done", (
             'role="progressbar" aria-label="Completed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"')
-    elif is_queued:
+    pct = int(round(min(max(float(progress or 0.0), 0.0), 0.99) * 100))
+    fill_style = ""
+    if is_queued and pct <= 0:
         progress_label, progress_value = (html.escape(wait_label) or "Waiting for the worker"), "—"
         progress_class, aria = "q-progress-track is-indeterminate", 'role="progressbar" aria-label="Waiting for a worker"'
     elif is_terminal:
-        progress_label, progress_value = "Not finished", "—"
+        progress_label, progress_value = "Not finished", f"stopped at {pct}%"
         progress_class = "q-progress-track is-terminal"
         aria = f'role="progressbar" aria-label="{html.escape(stage.value)} not completed"'
     else:
-        progress_label, progress_value = "Working on it", "In progress"
-        progress_class = "q-progress-track is-indeterminate"
-        aria = f'role="progressbar" aria-label="{html.escape(stage.value)} in progress"'
+        if is_queued:      # paused between steps (Colab check-back, quota wait, retry)
+            progress_label = html.escape(WAIT_LABELS.get(wait_kind, "") or wait_label or "Waiting")
+            progress_class = "q-progress-track is-paused"
+        else:
+            progress_label = html.escape(stage.value)
+            progress_class = "q-progress-track"
+        progress_value = f"{pct}%"
+        fill_style = f' style="width:{pct}%"'
+        aria = (f'role="progressbar" aria-label="{html.escape(stage.value)} in progress" '
+                f'aria-valuemin="0" aria-valuemax="100" aria-valuenow="{pct}"')
 
     elapsed_html = f" · ⏱️ {friendly_seconds(elapsed)}" if elapsed is not None else ""
     error_html = (
@@ -307,7 +351,7 @@ def render_job_card(
         <span class="q-stage" style="color:{color};">{icon} {html.escape(stage.value)}</span>
       </div>
       <div class="q-progress-meta"><span>{progress_label}</span><span>{progress_value}</span></div>
-      <div class="{progress_class}" {aria}><div class="q-progress-fill"></div></div>
+      <div class="{progress_class}" {aria}><div class="q-progress-fill"{fill_style}></div></div>
       <div style="margin-top:9px; font-size:0.92rem;">
         {html.escape(redact_sensitive_text(message))}<span class="vs-hint">{elapsed_html}</span>
         <span class="vs-hint" style="float:right;">#{html.escape(str(job_id))}</span>
@@ -315,6 +359,90 @@ def render_job_card(
       {error_html}
     </div>
     """
+
+
+ACTIVITY_ICONS = {"info": "•", "warn": "⚠️", "error": "❌", "done": "✅"}
+ACTIVITY_SHOWN = 60
+ACTIVITY_IDLE = "Nothing is running. Every step of your next video will appear here as it happens."
+
+
+def job_steps(sett: Optional[JobSettings]) -> List[tuple]:
+    """(label, Stage) of the steps this job will go through, in order."""
+    if sett and sett.mode == "script_story":
+        steps = [("Script", Stage.ENHANCING), ("Scenes", Stage.GENERATING), ("Join scenes", Stage.STITCHING),
+                 ("Voice & music", Stage.AUDIO)]
+    else:
+        steps = [("Prompt", Stage.ENHANCING), ("AI clips", Stage.GENERATING), ("Join clips", Stage.STITCHING)]
+        if sett and sett.interpolate_60fps:
+            steps.append(("Smooth motion", Stage.INTERPOLATING))
+        steps += [("Upscale", Stage.UPSCALING), ("Voice & music", Stage.AUDIO)]
+    if sett is None or sett.subtitles_enabled:
+        steps.append(("Subtitles", Stage.SUBTITLES))
+    return steps + [("Done", Stage.DONE)]
+
+
+def _current_step(job: JobStatus, stages: List[Stage]) -> Optional[Stage]:
+    """The step the job is on; for a waiting or stopped job, the last one it reached."""
+    if job.stage in stages:
+        return job.stage
+    for entry in reversed(list(job.activity)):
+        stage = Stage.from_str(entry.get("stage"))
+        if stage in stages and stage != Stage.DONE:
+            return stage
+    return None
+
+
+def _step_detail(job: JobStatus) -> str:
+    """e.g. "Clip 2/3 · step 7/20" from the latest message."""
+    text = job.message or ""
+    part = re.search(r"\b(Clip|Scene) (\d+)/(\d+)", text)
+    step = re.search(r"step (\d+)/(\d+)", text)
+    bits = [f"{part.group(1)} {part.group(2)}/{part.group(3)}"] if part else []
+    if step:
+        bits.append(f"step {step.group(1)}/{step.group(2)}")
+    return " · ".join(bits)
+
+
+def render_activity(job: Optional[JobStatus]) -> str:
+    """Live activity: the step checklist and a time-stamped list of everything
+    the job did, newest first. Refreshed by the page timer every 2 seconds."""
+    if job is None:
+        return f"<div class='vs-activity vs-hint'>{html.escape(ACTIVITY_IDLE)}</div>"
+    steps = job_steps(job.settings)
+    stages = [stage for _, stage in steps]
+    current = Stage.DONE if job.stage == Stage.DONE else _current_step(job, stages)
+    current_index = stages.index(current) if current in stages else -1
+    chips = []
+    for index, (label, stage) in enumerate(steps):
+        if job.stage == Stage.DONE or index < current_index:
+            state, mark = "done", "✓"
+        elif index == current_index:
+            failed = job.stage in (Stage.FAILED, Stage.CANCELLED)
+            state, mark = ("failed", "✗") if failed else ("now", "●")
+            detail = _step_detail(job) if stage == Stage.GENERATING and not failed else ""
+            if detail:
+                label = f"{label} · {detail}"
+        else:
+            state, mark = "todo", "○"
+        chips.append(f"<span class='vs-step is-{state}'>{mark} {html.escape(label)}</span>")
+    rows = []
+    entries = list(job.activity)[-ACTIVITY_SHOWN:]
+    for entry in reversed(entries):
+        when = time.strftime("%H:%M:%S", time.localtime(float(entry.get("t", 0) or 0)))
+        level = entry.get("level", "info")
+        text = html.escape(redact_sensitive_text(entry.get("text", "")))
+        rows.append(f"<li class='is-{html.escape(level)}'><time>{when}</time>"
+                    f"<span class='vs-act-icon'>{ACTIVITY_ICONS.get(level, '•')}</span><span>{text}</span></li>")
+    hidden = max(0, len(job.activity) - ACTIVITY_SHOWN)
+    more = f"<div class='vs-hint'>… {hidden} earlier line(s) in the technical log.</div>" if hidden else ""
+    body = "".join(rows) or "<li class='is-info'><span>Waiting for the first step…</span></li>"
+    return (f"<div class='vs-activity'><div class='vs-steps'>{''.join(chips)}</div>"
+            f"<ol class='vs-timeline' aria-live='polite'>{body}</ol>{more}</div>")
+
+
+def activity_job(mode: str) -> Optional[JobStatus]:
+    """The job whose activity a screen shows: the running one, else the newest."""
+    return active_job(mode) or newest_job(mode)
 
 
 def idle_card(text: str) -> str:
@@ -332,6 +460,7 @@ def card_for_job(job: JobStatus) -> str:
         max(0, int(time.time() - job.settings.created_at)) if job.settings and job.stage not in TERMINAL else None,
         queue_wait_label(job, STUDIO.queue.all_jobs()),
         job.error,
+        job.wait_kind,
     )
 
 
@@ -418,6 +547,8 @@ def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> t
         gr.update(visible=story_retry),
         _files_update(clip_path, clip_new),
         _files_update(story_path, story_new),
+        render_activity(activity_job("ai_video")),
+        render_activity(activity_job("script_story")),
     )
 
 
@@ -853,9 +984,11 @@ def _result_panel(height: int):
     with gr.Row():
         stop = gr.Button("⏹ Stop this video", variant="stop", size="sm", visible=False)
         retry = gr.Button("🔁 Try again", variant="primary", size="sm", visible=False)
+    with gr.Accordion("📡 Live activity — every step as it happens", open=True):
+        activity = gr.HTML(render_activity(None))
     video = gr.Video(label="Your video", interactive=False, height=height)
     files = gr.File(label="Captions and render report", file_count="multiple", interactive=False, visible=False)
-    return card, stop, retry, video, files
+    return card, stop, retry, video, files, activity
 
 
 def editor_render(path, start, end, shape, muted, caption, srt, position, size, narration=None, preview=True):
@@ -1053,7 +1186,7 @@ def build_app() -> gr.Blocks:
                         story_make = gr.Button("🎬 Make my video", variant="primary", elem_classes=["vs-make"])
                         story_status = gr.Markdown()
                     with gr.Column(scale=5):
-                        story_card, story_stop, story_retry, story_video, story_files = _result_panel(420)
+                        story_card, story_stop, story_retry, story_video, story_files, story_activity = _result_panel(420)
                         gr.Markdown("Uses stock footage or AI pictures with gentle camera motion, "
                                     "a narrator voice, music and subtitles.", elem_classes=["vs-hint"])
 
@@ -1091,7 +1224,7 @@ def build_app() -> gr.Blocks:
                         clip_make = gr.Button("🎬 Make my video", variant="primary", elem_classes=["vs-make"])
                         clip_status = gr.Markdown()
                     with gr.Column(scale=5):
-                        clip_card, clip_stop, clip_retry, clip_video, clip_files = _result_panel(360)
+                        clip_card, clip_stop, clip_retry, clip_video, clip_files, clip_activity = _result_panel(360)
                         gr.Markdown("A 5-second clip usually takes 1–3 minutes. Real AI video needs the free "
                                     "Hugging Face token (see Settings); if the free GPUs are busy, it waits "
                                     "and retries by itself.", elem_classes=["vs-hint"])
@@ -1222,7 +1355,7 @@ def build_app() -> gr.Blocks:
         # never stall Gradio's queue or drop the UI connection.
         sync_outputs = [clip_card, clip_video, clip_job_id, story_card, story_video, story_job_id,
                         last_clip_video, last_story_video, clip_stop, clip_retry, story_stop, story_retry,
-                        clip_files, story_files]
+                        clip_files, story_files, clip_activity, story_activity]
         sync_inputs = [last_clip_video, last_story_video]
         app.load(sync_job_outputs, sync_inputs, sync_outputs, queue=False)
         gr.Timer(2.0).tick(sync_job_outputs, sync_inputs, sync_outputs, show_progress="hidden", queue=False)

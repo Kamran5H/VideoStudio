@@ -93,14 +93,20 @@ class VideoStudioCoreTests(unittest.TestCase):
         self.assertIn("job&lt;1&gt;", card)
         self.assertNotIn("<script>", card)
         self.assertNotIn("<img", card)
-        self.assertIn("is-indeterminate", card)
+        self.assertIn("99%", card)                       # never shows 100% before it is really done
 
-    def test_running_job_shows_no_invented_percentage(self):
+    def test_running_job_shows_its_pipeline_percentage(self):
         card = render_job_card("active", "A video", Stage.GENERATING, 0.42, "Generating AI clip 2/4...")
-        self.assertIn("Working on it", card)
         self.assertIn('aria-label="Generating Video in progress"', card)
-        self.assertNotIn("42%", card)
-        self.assertNotIn("aria-valuenow", card)
+        self.assertIn("42%", card)
+        self.assertIn('aria-valuenow="42"', card)
+        self.assertIn("width:42%", card)
+        waiting = render_job_card("q", "A video", Stage.QUEUED, 0, "Queued...")
+        self.assertIn("is-indeterminate", waiting)        # nothing done yet: no number
+        colab = render_job_card("c", "A video", Stage.QUEUED, 0.5, "⏳ Colab: rendering, step 7/20",
+                                wait_kind="colab")
+        self.assertIn("Rendering on your Colab GPU", colab)
+        self.assertIn("50%", colab)
 
     def test_queue_wait_label_in_plain_words(self):
         active = JobStatus(job_id="a", stage=Stage.GENERATING, settings=JobSettings(job_id="a"))

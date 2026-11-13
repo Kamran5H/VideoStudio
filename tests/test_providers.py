@@ -397,3 +397,95 @@ class ColabNotebookTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveActivityTests(unittest.TestCase):
+    def _job(self, mode="ai_video", **kw):
+        return vs.JobStatus(job_id="act1", settings=vs.JobSettings(job_id="act1", mode=mode, **kw))
+
+    def test_activity_merges_repeats_and_is_capped(self):
+        job = self._job()
+        vs.add_activity(job, "Clip 1/3: trying Colab")
+        vs.add_activity(job, "Clip 1/3: trying Colab")         # a check-back repeats cheap steps
+        vs.add_activity(job, "  ")
+        self.assertEqual([e["text"] for e in job.activity], ["Clip 1/3: trying Colab"])
+        for i in range(vs.ACTIVITY_LIMIT + 20):
+            vs.add_activity(job, f"line {i}")
+        self.assertEqual(len(job.activity), vs.ACTIVITY_LIMIT)
+        self.assertEqual(job.activity[-1]["text"], f"line {vs.ACTIVITY_LIMIT + 19}")
+
+    def test_worker_thread_log_lines_reach_the_running_job_only(self):
+        import threading
+
+        queue = object.__new__(vs.JobQueue)
+        job = self._job()
+        queue._current_job = job
+        vs.THREAD_ACTIVITY.sinks[threading.get_ident()] = queue._activity_from_log
+        try:
+            vs.log.warning("Backend ltx23 quota-limited: ZeroGPU quota")
+            vs.log.info("Job act1 attempt 1/3 failed")            # bookkeeping: recorded in plain words instead
+            vs.log.debug("ffmpeg: -i x.mp4")                     # too noisy for the panel
+            other = threading.Thread(target=lambda: vs.log.warning("from another thread"))
+            other.start()
+            other.join()
+        finally:
+            vs.THREAD_ACTIVITY.sinks.pop(threading.get_ident(), None)
+        self.assertEqual([(e["level"], e["text"]) for e in job.activity],
+                         [("warn", "Backend ltx23 quota-limited: ZeroGPU quota")])
+
+    def test_activity_survives_a_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = object.__new__(vs.JobQueue)
+            queue.queue_file = Path(tmp) / "jobs.json"
+            queue._lock = __import__("threading").RLock()
+            queue._last_persist = 0.0
+            job = self._job()
+            vs.add_activity(job, "Scene 1/3: picture found", "info")
+            job.wait_kind = "colab"
+            queue._jobs = {"act1": job}
+            queue._save(force=True)
+            raw = json.loads(queue.queue_file.read_text(encoding="utf-8"))["act1"]
+            restored = vs.JobQueue._job_from_dict("act1", raw)
+        self.assertEqual(restored.activity[0]["text"], "Scene 1/3: picture found")
+        self.assertEqual(restored.wait_kind, "colab")
+        self.assertEqual(vs._load_activity(raw["activity"])[0]["text"], "Scene 1/3: picture found")
+        self.assertEqual(vs._load_activity("garbage"), [])
+
+    def test_progress_updates_and_failures_are_recorded(self):
+        queue = object.__new__(vs.JobQueue)
+        job = self._job()
+        queue._jobs, queue._cancelled_jobs = {"act1": job}, set()
+        queue._save = lambda force=False: None
+        queue._progress_callback("act1", vs.Stage.GENERATING, 0.3, "Clip 1/2: rendering, step 4/20")
+        queue._fail(job, "No usable visual was found")
+        self.assertEqual([(e["level"], e["stage"]) for e in job.activity],
+                         [("info", "Generating Video"), ("error", "Failed")])
+
+
+class ActivityPanelTests(unittest.TestCase):
+    def test_panel_shows_steps_detail_and_escaped_timeline(self):
+        import app
+
+        job = vs.JobStatus(job_id="p1", stage=vs.Stage.GENERATING, progress=0.4,
+                           message="Clip 2/3: Colab worker: rendering, step 7/20",
+                           settings=vs.JobSettings(job_id="p1", mode="ai_video", subtitles_enabled=True))
+        vs.add_activity(job, "Prompt ready", stage=vs.Stage.ENHANCING)
+        vs.add_activity(job, "<b>Backend ltx23 quota-limited</b>", "warn")
+        html_out = app.render_activity(job)
+        self.assertIn("is-done'>✓ Prompt", html_out)
+        self.assertIn("AI clips · Clip 2/3 · step 7/20", html_out)
+        self.assertIn("is-todo'>○ Subtitles", html_out)
+        self.assertIn("&lt;b&gt;Backend ltx23", html_out)
+        self.assertLess(html_out.index("Backend ltx23"), html_out.index("Prompt ready"))   # newest first
+
+    def test_waiting_and_failed_jobs_keep_their_place(self):
+        import app
+
+        story = vs.JobSettings(job_id="p2", mode="script_story", subtitles_enabled=False)
+        job = vs.JobStatus(job_id="p2", stage=vs.Stage.FAILED, settings=story)
+        vs.add_activity(job, "Scene 2/4: recording the narration", stage=vs.Stage.GENERATING)
+        vs.add_activity(job, "Voice failed", "error", stage=vs.Stage.FAILED)
+        out = app.render_activity(job)
+        self.assertIn("is-failed'>✗ Scenes", out)
+        self.assertNotIn("Subtitles", out)
+        self.assertIn(app.ACTIVITY_IDLE, app.render_activity(None))
