@@ -314,6 +314,25 @@ class VideoStudioCoreTests(unittest.TestCase):
             self.assertIn("must start with https://", app.save_api_credentials("my-worker", "", "", "", ""))
             save.assert_not_called()
 
+    def test_settings_normalizes_colab_url_and_reports_live_status(self):
+        cfg = app.STUDIO.config
+        saved_url = cfg.colab_url
+        colab_be = app.STUDIO.backends["colab"]
+        try:
+            with patch.object(cfg, "save"):
+                msg = app.save_api_credentials(" https://demo.gradio.live/ ", "", "", "", "")
+            self.assertTrue(msg.startswith("✅"))
+            self.assertEqual(cfg.colab_url, "https://demo.gradio.live")
+            with patch.object(colab_be, "check_connection", return_value=(False, "offline or expired (HTTP 404)")):
+                status_html = app.backend_status_html(check_colab=True)
+            self.assertIn("not responding", status_html)
+            self.assertNotIn("🟢 <b>Your Colab GPU worker</b>", status_html)
+            with patch.object(colab_be, "check_connection", return_value=(True, "connected")):
+                status_html = app.backend_status_html(check_colab=True)
+            self.assertIn("🟢 <b>Your Colab GPU worker</b> — ready (connected)", status_html)
+        finally:
+            cfg.colab_url = saved_url
+
     def test_job_settings_are_sanitized_from_raw_api_input(self):
         sett = app.build_ai_settings("  idea  ", "99:1", 10_000, None, "Klingon", "Robot", "Polka",
                                      1, "8K", "NotAStyle")

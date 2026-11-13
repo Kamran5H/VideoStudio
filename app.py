@@ -29,6 +29,7 @@ from video_studio import (
     MUSIC_MOODS,
     STYLE_PRESETS,
     TTS_VOICES,
+    ColabBackend,
     FreeLLMPromptEnhancer,
     JobSettings,
     JobStatus,
@@ -740,10 +741,13 @@ def secret_placeholder(current: str) -> str:
 
 def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: str, gemini_k: str) -> str:
     cfg = STUDIO.config
-    url = (colab_url or "").strip()
+    url = (colab_url or "").strip().rstrip("/")
     if url and not url.lower().startswith(("http://", "https://")):
         return "❌ The Colab worker URL must start with https:// — nothing was saved."
     cfg.colab_url = url
+    colab_be = STUDIO.backends.get("colab")
+    if isinstance(colab_be, ColabBackend):
+        colab_be.reset_client()
     cfg.hf_token = merge_secret(cfg.hf_token, hf_tok)
     cfg.pexels_api_key = merge_secret(cfg.pexels_api_key, pexels_k)
     cfg.pixabay_api_key = merge_secret(cfg.pixabay_api_key, pixabay_k)
@@ -760,10 +764,10 @@ def save_settings(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: str, ge
         return (message, *(gr.skip() for _ in range(4)), backend_status_html())
     boxes = [gr.update(value="", placeholder=secret_placeholder(key))
              for key in (cfg.hf_token, cfg.pexels_api_key, cfg.pixabay_api_key, cfg.gemini_api_key)]
-    return (message, *boxes, backend_status_html())
+    return (message, *boxes, backend_status_html(check_colab=True))
 
 
-def backend_status_html() -> str:
+def backend_status_html(check_colab: bool = False) -> str:
     labels = {
         "colab": "Your Colab GPU worker",
         "ltx23": "LTX-2.3 (free cloud)",
@@ -779,19 +783,35 @@ def backend_status_html() -> str:
             continue
         be = STUDIO.backends.get(name)
         ok = bool(be and be.available())
+        dot = "🟢" if ok else "⚪"
         if name == "colab":
-            state = "ready" if ok else "add the Colab URL to use"
+            if not ok:
+                state = "add the Colab URL to use"
+            elif check_colab and isinstance(be, ColabBackend):
+                live, detail = be.check_connection(timeout=3.0)
+                if live:
+                    state = f"ready ({html.escape(detail)})"
+                else:
+                    dot = "🟡"
+                    state = f"not responding ({html.escape(detail)}; re-run colab_worker.ipynb)"
+            else:
+                dot = "🟡"
+                state = "URL saved — click Check connection to test"
         elif has_token:
             state = "ready"
-            ok = True
+            dot = "🟢"
         else:
             state = "needs the free Hugging Face token"
-            ok = False
-        rows.append(f"{'🟢' if ok else '⚪'} <b>{label}</b> — {state}")
+            dot = "⚪"
+        rows.append(f"{dot} <b>{label}</b> — {state}")
     note = "" if has_token or STUDIO.config.colab_url.strip() else (
         "<div class='vs-hint' style='margin-top:8px;'>Without a Hugging Face token the free GPUs refuse "
         "video jobs, so AI clip uses pictures with camera motion instead.</div>")
     return "<div class='q-card'>" + "<br>".join(rows) + note + "</div>"
+
+
+def check_backends_status() -> str:
+    return backend_status_html(check_colab=True)
 
 
 def read_system_logs() -> str:
@@ -1170,6 +1190,7 @@ def build_app() -> gr.Blocks:
                     with gr.Column(elem_classes=["vs-panel"]):
                         gr.Markdown("### Video engines")
                         backend_box = gr.HTML(backend_status_html())
+                        check_conn_btn = gr.Button("🔄 Check connection", size="sm")
                         with gr.Accordion("Technical log", open=False):
                             log_box = gr.Textbox(lines=10, interactive=False, show_label=False)
                             gr.Button("Refresh log", size="sm").click(read_system_logs, None, log_box)
@@ -1181,6 +1202,7 @@ def build_app() -> gr.Blocks:
                     save_settings, [cfg_colab, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini],
                     [save_msg, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini, backend_box],
                 )
+                check_conn_btn.click(check_backends_status, None, backend_box)
                 off_btn.click(turn_off, None, off_msg)
 
         home_story.click(lambda: gr.Tabs(selected="story"), outputs=workspaces)
@@ -1199,6 +1221,7 @@ def build_app() -> gr.Blocks:
         app.load(sync_job_outputs, sync_inputs, sync_outputs)
         gr.Timer(2.0).tick(sync_job_outputs, sync_inputs, sync_outputs, show_progress="hidden")
         app.load(read_system_logs, None, log_box)
+        app.load(check_backends_status, None, backend_box)
 
     return app
 

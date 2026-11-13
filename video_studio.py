@@ -637,7 +637,12 @@ def looks_like_script(text: str, scene_count: Optional[int] = None) -> bool:
     return len(visuals) == len(set(visuals))
 
 
-DEFAULT_GEMINI_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite")
+DEFAULT_GEMINI_MODELS = (
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+)
 
 
 def gemini_models() -> List[str]:
@@ -1083,16 +1088,49 @@ class ColabBackend(GenerationBackend):
         self._client: Any = None
         self._client_url = ""
 
+    def _normalized_url(self) -> str:
+        return self.config.colab_url.strip().rstrip("/")
+
     def available(self) -> bool:
-        return bool(self.config.colab_url.strip())
+        return bool(self._normalized_url())
+
+    def reset_client(self) -> None:
+        self._client = None
+        self._client_url = ""
 
     def _get_client(self) -> Any:
         from gradio_client import Client
-        url = self.config.colab_url.strip()
+        url = self._normalized_url()
         if self._client is None or self._client_url != url:
             self._client = Client(url, verbose=False)
             self._client_url = url
         return self._client
+
+    def check_connection(self, timeout: float = 5.0) -> Tuple[bool, str]:
+        """Verify whether the configured Colab Gradio worker responds and exposes /generate."""
+        import requests
+
+        url = self._normalized_url()
+        if not url:
+            return (False, "not configured")
+        if not url.lower().startswith(("http://", "https://")):
+            return (False, "invalid URL scheme")
+        try:
+            resp = requests.get(f"{url}/gradio_api/info", timeout=timeout)
+        except requests.RequestException as exc:
+            return (False, f"unreachable ({type(exc).__name__})")
+        if resp.status_code != 200:
+            if resp.status_code in (404, 410):
+                return (False, f"offline or expired (HTTP {resp.status_code})")
+            return (False, f"HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError:
+            return (True, "connected")
+        endpoints = data.get("named_endpoints") if isinstance(data, dict) else None
+        if isinstance(endpoints, dict) and "/generate" not in endpoints:
+            return (False, "connected, but /generate endpoint is missing")
+        return (True, "connected")
 
     @staticmethod
     def _snap_wan13b(w: int, h: int) -> tuple[int, int]:
@@ -1105,16 +1143,20 @@ class ColabBackend(GenerationBackend):
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
         w, h = self._snap_wan13b(req.width, req.height)
         progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {req.steps} steps...")
-        client = self._get_client()
-        result = self._predict(
-            client,
-            req.prompt, req.negative_prompt, w, h,
-            req.num_frames, req.steps, req.guidance, req.seed,
-            api_name="/generate",
-        )
-        v_path = self._extract_video(result)
-        if not v_path:
-            raise RuntimeError(f"Colab returned invalid video response: {result}")
+        try:
+            client = self._get_client()
+            result = self._predict(
+                client,
+                req.prompt, req.negative_prompt, w, h,
+                req.num_frames, req.steps, req.guidance, req.seed,
+                api_name="/generate",
+            )
+            v_path = self._extract_video(result)
+            if not v_path:
+                raise RuntimeError(f"Colab returned invalid video response: {result}")
+        except Exception:
+            self.reset_client()
+            raise
         shutil.copyfile(v_path, out_path)
         return out_path
 
@@ -3611,15 +3653,17 @@ def main():
     args = parser.parse_args()
 
     if args.probe:
-        studio = VideoStudio()
+        cfg = StudioConfig.load()
+        probe = HardwareProbe()
+        ok, colab_status = ColabBackend(cfg).check_connection()
         print("\n" + "=" * 60)
         print("🎬 VideoStudio Pro Hardware & Environment Diagnostics")
         print("=" * 60)
-        print(studio.probe.summary())
+        print(probe.summary())
         print(f"Output Directory: {DEFAULT_OUTPUT_DIR}")
-        print("Backends Active: " + ", ".join(studio.config.backend_order))
+        print("Backends Active: " + ", ".join(cfg.backend_order))
+        print(f"Colab Worker: {'OK' if ok else 'OFFLINE'} ({colab_status})")
         print("=" * 60 + "\n")
-        studio.queue.shutdown()
         return
 
     # Web path: app.py creates its own single VideoStudio at import time.

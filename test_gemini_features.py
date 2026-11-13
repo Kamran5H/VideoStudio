@@ -31,7 +31,7 @@ def main() -> int:
                 '"Golden eagle soaring in mountains" into 1 cinematic prompt sentence.'
             ),
         )
-        print("Gemini 2.5 Flash Response:")
+        print("Gemini Response:")
         print(resp.text)
     except Exception as exc:
         print("Gemini text check failed:", exc)

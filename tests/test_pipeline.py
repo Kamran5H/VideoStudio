@@ -154,7 +154,11 @@ class NetworkHardeningTests(unittest.TestCase):
         with patch.dict(os.environ, {"GEMINI_MODELS": " a , b ,"}):
             self.assertEqual(vs.gemini_models(), ["a", "b"])
         with patch.dict(os.environ, {"GEMINI_MODELS": ""}):
-            self.assertNotIn("gemini-1.5-flash", vs.gemini_models())
+            models = vs.gemini_models()
+            self.assertNotIn("gemini-1.5-flash", models)
+            self.assertNotIn("gemini-2.5-flash", models)
+            self.assertNotIn("gemini-2.5-flash-lite", models)
+            self.assertIn("gemini-3.5-flash", models)
 
     def test_failed_or_tiny_download_leaves_no_file(self):
         class Resp:
@@ -327,6 +331,53 @@ class BackendTimeoutTests(unittest.TestCase):
             vs.ColabBackend._predict(Client(), "p", api_name="/generate", timeout=1)
         self.assertTrue(Job.cancelled)
         self.assertTrue(vs.is_transient_error(str(ctx.exception)))
+
+    def test_colab_backend_normalizes_url_and_resets_client_on_error(self):
+        cfg = vs.StudioConfig(colab_url="  https://demo.gradio.live/ ")
+        be = vs.ColabBackend(cfg)
+        self.assertTrue(be.available())
+        self.assertEqual(be._normalized_url(), "https://demo.gradio.live")
+        be._client = object()
+        be._client_url = "https://demo.gradio.live"
+        with patch.object(be, "_get_client", return_value=be._client), \
+             patch.object(be, "_predict", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                be.generate(vs.GenerationRequest(prompt="test"), Path("out.mp4"))
+        self.assertIsNone(be._client)
+        self.assertEqual(be._client_url, "")
+
+    def test_colab_check_connection_statuses(self):
+        import requests
+
+        be = vs.ColabBackend(vs.StudioConfig())
+        self.assertEqual(be.check_connection(), (False, "not configured"))
+
+        be.config.colab_url = "https://demo.gradio.live/"
+
+        class FakeResp:
+            def __init__(self, code, payload=None):
+                self.status_code = code
+                self._payload = payload
+
+            def json(self):
+                if isinstance(self._payload, Exception):
+                    raise self._payload
+                return self._payload
+
+        with patch("requests.get", return_value=FakeResp(404)):
+            self.assertEqual(be.check_connection(), (False, "offline or expired (HTTP 404)"))
+
+        with patch(
+            "requests.get",
+            return_value=FakeResp(200, {"named_endpoints": {"/generate": {}}}),
+        ):
+            self.assertEqual(be.check_connection(), (True, "connected"))
+
+        with patch("requests.get", return_value=FakeResp(200, {"named_endpoints": {}})):
+            self.assertEqual(be.check_connection(), (False, "connected, but /generate endpoint is missing"))
+
+        with patch("requests.get", side_effect=requests.ConnectionError("down")):
+            self.assertEqual(be.check_connection(), (False, "unreachable (ConnectionError)"))
 
     def test_free_text_reply_validation(self):
         self.assertTrue(vs.looks_like_prompt("A slow aerial shot over misty mountains at dawn."))
