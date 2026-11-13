@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 import re
+import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -19,7 +21,24 @@ from video_studio import (
 EDIT_DIR = DEFAULT_OUTPUT_DIR / "editor"
 
 
+KEEP_SECONDS = 7 * 24 * 3600
+
+
+def prune_old_work(now: float | None = None) -> None:
+    """Previews and exports pile up one folder per render; drop week-old ones."""
+    cutoff = (time.time() if now is None else now) - KEEP_SECONDS
+    if not EDIT_DIR.is_dir():
+        return
+    for folder in EDIT_DIR.iterdir():
+        try:
+            if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            continue
+
+
 def work_dir() -> Path:
+    prune_old_work()
     folder = EDIT_DIR / uuid.uuid4().hex[:12]
     folder.mkdir(parents=True, exist_ok=True)
     return folder

@@ -41,7 +41,7 @@ The Google Flow browser session was verified as signed in with a PRO badge, and 
 The local editor makes no remote generation requests. Clip transfer currently uses download/import; automatic monitoring of Google downloads, unattended browser generation and two-way synchronization have not been implemented. Google remains responsible for its account limits. The editor does not create unlimited subscription access.
 
 ### Local editing files and limits
-Each render creates a separate folder in `outputs/editor/`, preserving source files. Preview output is capped at 720 pixels on the long edge; full edits are capped at 1920. Multi-clip assembly currently caps the long edge at 1280. Up to 20 clips and 20 minutes are accepted. Keep original downloads for higher-resolution workflows. These editor files are not currently included in the main job-retention cleanup; remove unwanted editor folders when finished.
+Each render creates a separate folder in `outputs/editor/`, preserving source files. Preview output is capped at 720 pixels on the long edge; full edits are capped at 1920. Multi-clip assembly currently caps the long edge at 1280. Up to 20 clips and 20 minutes are accepted. Keep original downloads for higher-resolution workflows. Editor folders older than seven days are removed automatically.
 
 ### Source layout
 - `app.py`: browser links, import controls, assembly ordering and live preview events.
@@ -79,3 +79,21 @@ For a workflow without API keys, open the voiceover planning accordion in Google
 For the exact sound of your recorded voice, record or upload the complete narration in the live editor. This is a recording, not generated cloning. It replaces source sound, begins at the selected video's start, and is padded with silence if shorter. If longer, extend the selection or shorten the recording. Source mute does not mute this separately selected narration. SRT captions are provided separately and are not automatically transcribed from the recording.
 
 Automatic Flow transfer, production-grade Urdu voice cloning and face-aware subtitle tracking remain unfinished. Existing browser controls and the import workflow do not constitute a permanent account API connection.
+
+## Beginner interface
+
+The app opens on Start with three choices: Turn an idea into a story, Edit a video I have, and Use my Google plan. The bar at the top is the navigation: Start, Edit a video, Make a story, AI clip, My videos, My voice and Settings. The selected screen is highlighted.
+
+The editor follows Add your video → Make it yours → Preview & download. Add one file, optionally write a caption and choose a shape. Trim, voice/sound, subtitle appearance and joining several clips are collapsed optional sections. Update preview and Make my finished video are enabled after a video is added. The finished file appears under the buttons once it is made.
+
+The story screen shows the topic, shape and make button. The script editor and scene count are inside Review or write my script. Quality, voice, music and delivery remain inside More options.
+
+### What each button does
+- **Make my video** queues the job and returns immediately. The page timer follows the job, so a refresh never loses it and several videos can be queued.
+- **Stop this video** is shown only while a job is queued or rendering. **Try again** is shown when the newest job failed or was stopped; it resumes from the saved checkpoint.
+- A failed or stopped job keeps its card and reason on screen until a new video is made.
+- **My voice** is checked when Make my video is pressed. If there is no saved sample, no token, or the language is unsupported, the message says so and nothing is queued.
+- **My videos** plays any finished video, offers its captions and render report, deletes a video with its files, and opens the videos folder. If the folder cannot be opened, its path is shown.
+- **Save settings** empties the key boxes and marks saved keys. A Colab worker URL that does not start with http(s):// is rejected.
+- Empty **Improve my idea** and **Write the script for me** presses show a message.
+- Editor previews and exports older than seven days are removed from `outputs/editor/`.

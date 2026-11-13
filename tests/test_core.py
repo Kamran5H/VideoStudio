@@ -161,8 +161,8 @@ class VideoStudioCoreTests(unittest.TestCase):
                 again = sync_job_outputs(str(video), "")
                 self.assertEqual(again[1], app.gr.skip())
 
-    def test_make_clip_requires_an_idea_and_streams_status(self):
-        msg = next(app.make_clip("   ", "16:9", 5, "", "English", "Female", "Ambient", True, "1080p", "Cinematic"))
+    def test_make_clip_requires_an_idea_and_queues_without_blocking(self):
+        msg = app.make_clip("   ", "16:9", 5, "", "English", "Female", "Ambient", True, "1080p", "Cinematic")
         self.assertIn("describe", msg[0])
         queue = app.STUDIO.queue
         status = JobStatus(job_id="active", stage=Stage.GENERATING, message="Generating AI clip 1/1",
@@ -171,14 +171,70 @@ class VideoStudioCoreTests(unittest.TestCase):
             patch.object(queue, "submit", return_value="active") as submit,
             patch.object(queue, "get_status", return_value=status),
             patch.object(queue, "all_jobs", return_value=[status]),
-            patch.object(app.time, "sleep"),
         ):
-            update = next(app.make_clip("A boat", "9:16", 5, "", "English", "Female", "Ambient",
-                                        True, "1080p", "Cinematic"))
+            update = app.make_clip("A boat", "9:16", 5, "", "English", "Female", "Ambient",
+                                   True, "1080p", "Cinematic")
         self.assertIn("Making your video", update[0])
         self.assertNotIn("%", update[0])
+        self.assertIn("Generating AI clip 1/1", update[1])
+        self.assertEqual(update[2], "active")
         sett = submit.call_args.args[0]
         self.assertEqual((sett.aspect_ratio, sett.voice_script), ("9:16", ""))
+
+    def test_failed_job_stays_visible_with_try_again(self):
+        done = JobStatus(job_id="old", stage=Stage.DONE, video_path=__file__,
+                         settings=JobSettings(job_id="old", mode="script_story", prompt="Old story", created_at=1))
+        failed = JobStatus(job_id="bad", stage=Stage.FAILED, error="boom",
+                           settings=JobSettings(job_id="bad", mode="script_story", prompt="New story", created_at=2))
+        queue = app.STUDIO.queue
+        with patch.object(queue, "all_jobs", return_value=[done, failed]):
+            card, video, job_id, can_stop, can_retry = app.tab_state("script_story")
+        self.assertIn("New story", card)
+        self.assertEqual((video, job_id, can_stop, can_retry), (__file__, "bad", False, True))
+        with (patch.object(queue, "get_status", return_value=failed),
+              patch.object(queue, "retry", return_value=True) as retry):
+            self.assertIn("Trying again", app.retry_job("bad"))
+        retry.assert_called_once_with("bad")
+        with patch.object(queue, "get_status", return_value=done):
+            self.assertIn("nothing to try again", app.retry_job("old"))
+        self.assertEqual(app.stop_job(""), "Nothing is running right now.")
+
+    def test_my_voice_is_checked_before_a_job_is_queued(self):
+        queue = app.STUDIO.queue
+        cloner = app.STUDIO.audio_engine.voice_cloner
+        with (patch.object(cloner, "unavailable_reason", return_value="no voice sample is saved yet"),
+              patch.object(queue, "submit") as submit):
+            message = app.make_story("Oceans", "", "9:16", "English", app.MY_VOICE, "Calm", True, "Cinematic")[0]
+            self.assertIn("My voice cannot be used", message)
+            submit.assert_not_called()
+            # A clip without narration never needs the voice, so it is not blocked.
+            app.make_clip("A boat", "16:9", 5, "", "English", app.MY_VOICE, "Calm", True, "1080p", "Cinematic")
+            submit.assert_called_once()
+
+    def test_library_lists_and_deletes_finished_videos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "result.mp4"
+            video.write_bytes(b"video")
+            done = JobStatus(job_id="lib-done", stage=Stage.DONE, video_path=str(video),
+                             settings=JobSettings(job_id="lib-done", mode="script_story", prompt="Salty ocean"))
+            running = JobStatus(job_id="lib-run", stage=Stage.GENERATING,
+                                settings=JobSettings(job_id="lib-run", prompt="Busy"))
+            queue = app.STUDIO.queue
+            with patch.dict(queue._jobs, {"lib-done": done, "lib-run": running}, clear=True), patch.object(queue, "_save"):
+                (label, job_id), = app.library_choices()
+                self.assertIn("Salty ocean · Story", label)
+                self.assertEqual(app.library_show(job_id)[0], str(video))
+                self.assertFalse(queue.remove("lib-run"))          # still rendering: must be stopped first
+                self.assertTrue(queue.remove("lib-done"))
+                self.assertFalse(video.exists())
+                self.assertEqual(app.library_choices(), [])
+                self.assertIn("lib-run", queue._jobs)
+
+    def test_settings_reject_a_bad_worker_url_without_saving(self):
+        cfg = app.STUDIO.config
+        with patch.object(cfg, "save") as save:
+            self.assertIn("must start with https://", app.save_api_credentials("my-worker", "", "", "", ""))
+            save.assert_not_called()
 
     def test_job_settings_are_sanitized_from_raw_api_input(self):
         sett = app.build_ai_settings("  idea  ", "99:1", 10_000, None, "Klingon", "Robot", "Polka",
@@ -229,7 +285,7 @@ class VideoStudioCoreTests(unittest.TestCase):
             self.assertFalse(queue.cancel("missing-job"))
             self.assertFalse(queue.retry("missing-job"))
             queue._auto_resume_interrupted_jobs()
-            self.assertIn("already running", next(app.make_clip("x", "16:9", 5, "", "", "", "", 1, "", ""))[0])
+            self.assertIn("already running", app.make_clip("x", "16:9", 5, "", "", "", "", 1, "", "")[0])
         finally:
             queue.is_worker = is_worker
 

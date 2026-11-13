@@ -2671,6 +2671,27 @@ class JobQueue:
                 return True
         return False
 
+    def remove(self, job_id: str) -> bool:
+        """Delete a finished, failed or stopped job together with its files.
+        A job that is still queued or rendering must be stopped first."""
+        if not self.is_worker:
+            return False
+        with self._lock:
+            js = self._jobs.get(job_id)
+            if js is None or js.stage not in (Stage.DONE, Stage.FAILED, Stage.CANCELLED):
+                return False
+            del self._jobs[job_id]
+            self._cancelled_jobs.discard(job_id)
+            self._save(force=True)
+        for path in (js.video_path, js.srt_path, js.thumbnail_path):
+            if path:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning("Could not delete %s: %s", path, exc)
+        shutil.rmtree(DEFAULT_OUTPUT_DIR / "jobs" / job_id, ignore_errors=True)
+        return True
+
     def get_status(self, job_id: str) -> Optional[JobStatus]:
         return self._jobs.get(job_id)
 

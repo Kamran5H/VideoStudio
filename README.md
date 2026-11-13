@@ -15,23 +15,26 @@
 
 ## Using it (no experience needed)
 
-1. Double-click **VideoStudio** on your desktop (or run `python app.py`). Your browser opens the studio.
+1. Double-click **VideoStudio** on your desktop (or run `python app.py`). Your browser opens the studio on the **🏠 Start** page.
    No desktop icon yet? Double-click **`Install Desktop Shortcut.vbs`** in the VideoStudio folder once.
-2. **🎬 Quick clip:** describe what the video should show, pick a shape (Wide, Tall or Square) and a length, then press **Make my video**.
-   **📖 Story video:** type a topic, press **Write the script for me** (or paste your own), then press **Make my video**.
-3. Watch the status card. When it says ✅ Completed, use the ⬇ button on the player to download.
+2. Pick one of the three cards, or use the bar at the top:
+   - **📖 Make a story:** type a topic and press **Make my video**. The script is written for you; open *Review or write my script* to see or change it first.
+   - **✂️ Edit a video:** add a clip, optionally add a caption, trim it or record your voice, then press **Make my finished video**.
+   - **🎬 AI clip:** describe one scene, pick a shape and a length, then press **Make my video**.
+3. Watch the status card. **⏹ Stop this video** appears only while a video is rendering. If a video fails or you stop it, the card stays with the reason and a **🔁 Try again** button that continues from the last finished part.
+4. **📁 My videos** lists every finished video with its captions and render report. You can play, download or delete them there, or open the folder.
 
-**🎙️ My voice (optional):** record 10 to 20 seconds of yourself, press **Save my voice**, then pick **Voice → My voice** under *More options* and the narrator sounds like you. It is a close likeness, not a perfect copy. It works in English, Hindi, Arabic, Spanish, French, German, Chinese and Japanese (the free cloning model has no Urdu or Punjabi yet; those use the standard voices), and it needs the same free Hugging Face token as AI video. If it cannot be used, the video is still made with the standard voice and the result card says why.
+**🎙️ My voice (optional):** record 10 to 20 seconds of yourself, press **Save my voice**, and the Voice choice under *More options* switches to **My voice**. It is a close likeness, not a perfect copy. It works in English, Hindi, Arabic, Spanish, French, German, Chinese and Japanese (the free cloning model has no Urdu or Punjabi yet), and it needs the same free Hugging Face token as AI video. If My voice cannot be used for a video, you are told why when you press **Make my video**, before anything is queued.
 
-Voice language, music, subtitles, quality and visual style are under **More options**. Finished videos include downloadable SRT captions and a JSON render report showing the selected assets and export dimensions. API keys are optional and go in **⚙️ Settings**. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
+Voice language, music, subtitles, quality and visual style are under **More options**. **⚙️ Settings** shows one key up front, the free Hugging Face token; the other keys are under *More keys (optional)*. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
 
-> **The studio uses local processing and hosted services; provider availability and account limits apply. Real AI video needs:** a Hugging Face account token. Hugging Face refuses GPU jobs from visitors who are not signed in, so without a token **Quick clip** makes its video from AI pictures with camera motion instead (and tells you so). Create a free account at huggingface.co, open *Settings → Access Tokens*, make a **Read** token and paste it into **⚙️ Settings**. A free account gets a few minutes of GPU time per day, which is a handful of 5-second clips.
+> **The studio uses local processing and hosted services; provider availability and account limits apply. Real AI video needs:** a Hugging Face account token. Hugging Face refuses GPU jobs from visitors who are not signed in, so without a token **AI clip** makes its video from AI pictures with camera motion instead (and tells you so). Create a free account at huggingface.co, open *Settings → Access Tokens*, make a **Read** token and paste it into **⚙️ Settings**. A free account gets a few minutes of GPU time per day, which is a handful of 5-second clips.
 
 ## What happens behind the button
 
 VideoStudio runs on your computer, but the heavy diffusion work is sent to free cloud GPUs. FFmpeg then assembles the finished video on your machine.
 
-**🎬 Quick clip** (text-to-video):
+**🎬 AI clip** (text-to-video):
 1. **Prompt enhancement.** Gemini (if you set a key) rewrites the prompt. If not, a free Pollinations text model does it, and an offline style template is the last fallback.
 2. **Generation in 5-second chunks.** Each chunk is chained to the next through its last frame. Backends are tried in order:
    - your own **Colab T4 worker** running Wan2.1-T2V-1.3B ([`colab_worker.ipynb`](colab_worker.ipynb))
@@ -47,7 +50,7 @@ VideoStudio runs on your computer, but the heavy diffusion work is sent to free 
 
 **Voice cloning** uses the free `ResembleAI/Chatterbox-Multilingual-TTS` Space. Narration is sent in pieces of up to 280 characters (the Space cuts anything past 300) and joined with FFmpeg. Each piece costs about a minute of the free daily GPU time. Your recording is stored only in `outputs/voices/` and is uploaded to that Space while a video is being made.
 
-**📖 Story video** (script-to-video). You write `Visual:` / `VO:` lines, or have them drafted for you (Gemini if you set a key, otherwise a free Pollinations text model, otherwise a clear error asking you to paste a script). Each scene gets:
+**📖 Make a story** (script-to-video). You write `Visual:` / `VO:` lines, or have them drafted for you (Gemini if you set a key, otherwise a free Pollinations text model, otherwise a clear error asking you to paste a script). Each scene gets:
 - a stock clip from Pexels or Pixabay, or a still image from Wikimedia or Pollinations, animated with Ken Burns motion
 - its own narration
 
@@ -70,7 +73,7 @@ Narration and subtitles are timed to each scene's on-screen slot, so they stay i
 
 - Python **3.10+**
 - **FFmpeg**: the system `ffmpeg` is used if it's on PATH; otherwise the binary bundled with `imageio-ffmpeg` (installed from `requirements.txt`). Burned-in subtitles need an FFmpeg build with libass.
-- Optional keys, all set in `.env` (see [`.env.example`](.env.example)) or in the **⚙️ Settings & System** tab:
+- Optional keys, all set in `.env` (see [`.env.example`](.env.example)) or in the **⚙️ Settings** tab:
 
 | Variable | Used for |
 |---|---|
@@ -98,7 +101,7 @@ On Windows, `run_videostudio.vbs` starts the studio silently in the background (
 ### Optional: free Colab GPU worker
 1. Open [`colab_worker.ipynb`](colab_worker.ipynb) in Google Colab.
 2. Select a T4 GPU and run all cells.
-3. Paste the printed `*.gradio.live` URL into **⚙️ Settings & System → Google Colab Worker URL**.
+3. Paste the printed `*.gradio.live` URL into **⚙️ Settings → More keys → Colab worker URL**.
 
 ## Refresh and job recovery
 
@@ -118,7 +121,8 @@ Tests write to a temporary output folder, never your `outputs/`. `test_verify.py
 ## Repository layout
 
 ```text
-app.py                 Gradio UI: Quick clip, Story video, My voice, Settings
+app.py                 Gradio UI: Start, Edit a video, Make a story, AI clip, My videos, My voice, Settings
+local_editor.py        Local trim / caption / voiceover / join editor (FFmpeg only, no network)
 video_studio.py        Pipeline: backends, media fetch, TTS, subtitles, FFmpeg engine, job queue
 colab_worker.ipynb     Free Colab GPU worker exposing /generate for Wan2.1-T2V-1.3B
 tests/                 Offline unit and FFmpeg regression tests
