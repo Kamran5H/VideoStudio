@@ -23,14 +23,19 @@ logPath = appDir & "\outputs\logs\launch.log"
 WshShell.CurrentDirectory = appDir
 
 Function ServerUp()
-  Dim h
+  Dim h, st
   ServerUp = False
   On Error Resume Next
   Set h = CreateObject("MSXML2.ServerXMLHTTP.6.0")
   h.setTimeouts 1500, 1500, 1500, 1500
   h.Open "GET", "http://127.0.0.1:7860/", False
   h.Send
-  If Err.Number = 0 And h.Status = 200 Then ServerUp = True
+  If Err.Number = 0 Then
+    st = h.Status
+    If Err.Number = 0 Then
+      If st = 200 Then ServerUp = True
+    End If
+  End If
   On Error GoTo 0
 End Function
 
