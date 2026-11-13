@@ -83,8 +83,13 @@ THEME = Soft(
 )
 
 CSS = """
-.gradio-container { max-width: 1120px !important; margin: 0 auto !important; }
-#vs-hero { text-align: center; padding: 18px 8px 6px; }
+.gradio-container { max-width: 1180px !important; margin: 0 auto !important; }
+#vs-hero { text-align: left; padding: 28px 8px 20px; }
+.vs-brand-dot { color: #6366f1; }
+.vs-welcome-card { padding: 24px !important; border: 1px solid var(--border-color-primary); border-radius: 20px; background: var(--block-background-fill); }
+.vs-panel { padding: 18px !important; }
+#vs-navigation { margin-bottom: 18px; }
+#vs-workspaces .tab-wrapper { display: none; }
 #vs-hero h1 { font-size: 2rem; margin: 0; letter-spacing: -0.02em; }
 #vs-hero p { margin: 6px 0 0; opacity: 0.75; font-size: 1.02rem; }
 .vs-steps { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
@@ -114,13 +119,9 @@ CSS = """
 
 HERO_HTML = """
 <div id="vs-hero">
-  <h1>🎬 VideoStudio</h1>
-  <p>Type an idea, press one button, get a video. Free cloud AI does the heavy work.</p>
-  <div class="vs-steps">
-    <span class="vs-step">1 · Describe it</span>
-    <span class="vs-step">2 · Pick a shape</span>
-    <span class="vs-step">3 · Press Make my video</span>
-  </div>
+  <h1>VideoStudio<span class="vs-brand-dot">.</span></h1>
+  <p>Your idea. Your voice. Your next video.</p>
+
 </div>
 """
 
@@ -666,65 +667,64 @@ def editor_join(paths, order):
 
 
 def build_flow_workspace():
-    with gr.Tab("Google Flow & live editor", id="flow_editor"):
-        gr.Markdown(
-            "### Create in Google Flow, edit here\n"
-            "Use your signed-in Google account in Flow. No API key is needed for this workflow. "
-            "Your Google plan's limits apply. Download finished clips from Flow and import them below. "
-            "Account sign-in and generation stay in Google's browser workspace."
-        )
-        with gr.Row():
-            gr.Button("Open Google Flow", link="https://flow.google.com/", variant="primary")
-            gr.Button("Open Gemini", link="https://gemini.google.com/app")
-        with gr.Accordion("Plan an engaging voiceover in Gemini — no API key", open=False):
-            brief_topic = gr.Textbox(label="Topic and verified facts", lines=3)
-            brief_language = gr.Dropdown(LANGUAGES, value="Urdu", label="Script language")
-            brief_count = gr.Slider(2, 6, value=4, step=1, label="Scenes")
-            brief_button = gr.Button("Prepare Gemini request")
-            brief_output = gr.Textbox(label="Copy this request into Gemini; review the reply before using it", lines=8)
-            brief_button.click(browser_script_brief, [brief_topic, brief_language, brief_count], brief_output)
-        gr.Markdown("**1 · Import your clips**")
-        with gr.Accordion("Assemble several clips", open=False):
-            uploads = gr.File(label="Clips (numbered in the order listed)", file_count="multiple",
-                              file_types=[".mp4", ".mov", ".webm", ".mkv"])
-            order = gr.Textbox(label="Playback order", placeholder="Optional: 2,1,3")
-            join = gr.Button("Assemble clips")
-            join_status = gr.Markdown()
-        with gr.Row():
-            with gr.Column():
-                source = gr.Video(label="Source video — upload one clip or assemble above", sources=["upload"], interactive=True)
-                with gr.Row():
-                    start = gr.Number(value=0, minimum=0, label="Start (seconds)")
-                    end = gr.Number(value=0, minimum=0, label="End (seconds; 0 = end of video)")
-                shape = gr.Radio(["Original", "16:9", "9:16", "1:1"], value="Original", label="Frame shape (fit without cropping)")
-                muted = gr.Checkbox(value=False, label="Mute original sound")
-                narration = gr.Audio(label="Your complete voiceover (optional)", sources=["upload", "microphone"], type="filepath")
-                gr.Markdown("Record or upload the actual narration to use your exact recorded voice, including Urdu. "
-                            "It replaces source sound and starts at the beginning of the selected range. Mute applies to source sound only.")
-                caption = gr.Textbox(label="Short caption", placeholder="اردو عبارت یہاں لکھیں", lines=2,
-                                     info="Shown across the selected range. For timed subtitles, upload SRT below.")
-                srt = gr.File(label="Timed subtitles (.srt, UTF-8; times refer to the source video)", file_types=[".srt"])
-                position = gr.Radio(["Auto: less clutter", "Top", "Bottom"], value="Auto: less clutter", label="Caption placement")
-                size = gr.Slider(.7, 1.5, value=1, step=.1, label="Caption size")
-                gr.Markdown("Auto compares detail in the top and bottom bands. It does not detect faces; use the placement control when needed.")
-            with gr.Column():
-                preview_video = gr.Video(label="Live preview — first 8 seconds of your selection", interactive=False)
-                status = gr.Markdown("Import a video to begin.")
-                refresh = gr.Button("Refresh preview")
-                export = gr.Button("Export full selection", variant="primary")
-                download = gr.File(label="Download edited MP4", interactive=False)
-                gr.Markdown("Preview refreshes after a control change or when you leave the caption field. "
-                            "Export renders the full selected range. Original clips are retained.")
+    with gr.Tab("Edit a video", id="flow_editor"):
+        gr.Markdown("## Make your video yours\nAdd a clip, make a few changes, then download. Your original stays safe.")
+        with gr.Accordion("Need a video? Use your Google plan", open=False) as google_help:
+            gr.Markdown("**1.** Open Flow and create a clip. **2.** Download it. **3.** Add it below. Your Google plan's limits apply; no API key is needed here.")
+            with gr.Row():
+                gr.Button("Open Google Flow ↗", link="https://flow.google.com/", variant="primary")
+                gr.Button("Open Gemini ↗", link="https://gemini.google.com/app")
+            with gr.Accordion("Help me write a voiceover", open=False):
+                brief_topic = gr.Textbox(label="What is your video about?", lines=2)
+                brief_language = gr.Dropdown(LANGUAGES, value="Urdu", label="Language")
+                brief_count = gr.Slider(2, 6, value=4, step=1, label="Scenes")
+                brief_button = gr.Button("Prepare my writing prompt")
+                brief_output = gr.Textbox(label="Copy this into Gemini, then review its reply", lines=6)
+                brief_button.click(browser_script_brief, [brief_topic, brief_language, brief_count], brief_output)
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=4, elem_classes=["vs-panel"]):
+                gr.Markdown("### 1 · Add your video")
+                source = gr.File(label="Choose a video", file_types=[".mp4", ".mov", ".webm", ".mkv"])
+                with gr.Accordion("Join several videos", open=False):
+                    uploads = gr.File(label="Add your clips", file_count="multiple", file_types=[".mp4", ".mov", ".webm", ".mkv"])
+                    order = gr.Textbox(label="Change the order (optional)", placeholder="Example: 2,1,3")
+                    join = gr.Button("Join my clips")
+                    join_status = gr.Markdown()
+                gr.Markdown("### 2 · Make it yours")
+                caption = gr.Textbox(label="Add a caption (optional)", placeholder="Write a short line… / اردو میں لکھیں", lines=2)
+                shape = gr.Radio([("Keep original", "Original"), ("Wide", "16:9"), ("Tall", "9:16"), ("Square", "1:1")], value="Original", label="Video shape")
+                with gr.Accordion("Trim the video", open=False):
+                    gr.Markdown("Keep the whole clip, or enter the part you want. End at 0 keeps everything after the start.")
+                    with gr.Row():
+                        start = gr.Number(value=0, minimum=0, label="Start at (seconds)")
+                        end = gr.Number(value=0, minimum=0, label="End at (0 = end)")
+                with gr.Accordion("Voice & sound", open=False):
+                    muted = gr.Checkbox(value=False, label="Mute the original sound")
+                    narration = gr.Audio(label="Record or add your narration", sources=["upload", "microphone"], type="filepath")
+                    gr.Markdown("Your recording replaces the original sound and starts with your selected clip. Urdu is welcome.")
+                with gr.Accordion("Caption appearance & subtitle files", open=False):
+                    position = gr.Radio([("Choose for me", "Auto: less clutter"), ("Top", "Top"), ("Bottom", "Bottom")], value="Auto: less clutter", label="Put captions")
+                    size = gr.Slider(.7, 1.5, value=1, step=.1, label="Text size")
+                    srt = gr.File(label="Add timed subtitles (.srt)", file_types=[".srt"])
+                    gr.Markdown("Automatic placement estimates the quieter area. You can move captions above. Subtitle times refer to the original clip.")
+            with gr.Column(scale=5, elem_classes=["vs-panel"]):
+                gr.Markdown("### 3 · Preview & download")
+                preview_video = gr.Video(label="Your preview", interactive=False, height=360)
+                status = gr.Markdown("Your preview will appear after you add a video.")
+                refresh = gr.Button("↻ Update preview", size="sm")
+                export = gr.Button("Download my finished video", variant="primary", interactive=False, elem_classes=["vs-make"])
+                download = gr.File(label="Your finished video", interactive=False)
+                gr.Markdown("Preview shows the first 8 seconds. Download creates your full selected video.", elem_classes=["vs-hint"])
         inputs = [source, start, end, shape, muted, caption, srt, position, size, narration]
+        source.change(lambda path: gr.Button(interactive=bool(path)), source, export, queue=False)
         join.click(editor_join, [uploads, order], [source, join_status], concurrency_id="local_editor", concurrency_limit=1)
         for control in (source, start, end, shape, muted, srt, position, narration):
-            control.change(editor_render, inputs, [preview_video, status], concurrency_id="local_editor",
-                           concurrency_limit=1, trigger_mode="always_last")
+            control.change(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1, trigger_mode="always_last")
         caption.blur(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
         size.release(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
         refresh.click(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
-        export.click(lambda *args: editor_render(*args, preview=False), inputs, [download, status],
-                     concurrency_id="local_editor", concurrency_limit=1)
+        export.click(lambda *args: editor_render(*args, preview=False), inputs, [download, status], concurrency_id="local_editor", concurrency_limit=1)
+    return google_help
 
 
 def browser_script_brief(topic, language, scenes):
@@ -752,10 +752,31 @@ def build_app() -> gr.Blocks:
         last_clip_video = gr.State("")
         last_story_video = gr.State("")
 
-        with gr.Tabs():
-            build_flow_workspace()
+        with gr.Row(elem_id="vs-navigation"):
+            home_button = gr.Button("⌂ Start", size="sm")
+            edit_button = gr.Button("Edit a video", size="sm")
+            create_button = gr.Button("Make a story", size="sm")
+            with gr.Accordion("More tools", open=False):
+                quick_button = gr.Button("Make an AI clip", size="sm")
+                voice_button = gr.Button("My voice", size="sm")
+                settings_button = gr.Button("Settings", size="sm")
+        with gr.Tabs(selected="home", elem_id="vs-workspaces") as workspaces:
+            with gr.Tab("Start", id="home"):
+                gr.Markdown("## What would you like to do?\nPick one. We’ll guide you from there.")
+                with gr.Row(equal_height=True):
+                    with gr.Column(elem_classes=["vs-welcome-card"]):
+                        gr.Markdown("### Use my Google plan\nCreate a clip in Flow, then add your voice, captions and finishing touches here.")
+                        home_google = gr.Button("Start with Google →", variant="primary")
+                    with gr.Column(elem_classes=["vs-welcome-card"]):
+                        gr.Markdown("### Edit a video I have\nTrim it, add a caption, record your voice, and download your finished video.")
+                        home_edit = gr.Button("Choose my video →")
+                    with gr.Column(elem_classes=["vs-welcome-card"]):
+                        gr.Markdown("### Turn an idea into a story\nWrite a topic and make a narrated video with pictures or stock clips.")
+                        home_story = gr.Button("Make my story →")
+                gr.Markdown("**New here?** Try editing one short clip first. You can leave every optional setting as it is.")
+            google_help = build_flow_workspace()
             # ---------------------------------------------------------- Quick clip
-            with gr.Tab("🎬 Quick clip", id="clip"):
+            with gr.Tab("AI clip", id="clip"):
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=5):
                         clip_prompt = gr.Textbox(
@@ -796,25 +817,27 @@ def build_app() -> gr.Blocks:
                 clip_video.change(files_for_video, clip_video, clip_files)
 
             # ---------------------------------------------------------- Story video
-            with gr.Tab("📖 Story video", id="story"):
+            with gr.Tab("Make a story", id="story"):
+                gr.Markdown("## Tell your story\nStart with a topic. Preview the script if you like, then make your video.")
                 with gr.Row(equal_height=False):
                     with gr.Column(scale=5):
                         story_topic = gr.Textbox(
                             label="What is your video about?",
                             placeholder="e.g. Why the ocean is salty",
                         )
-                        with gr.Row():
-                            story_scenes = gr.Slider(*STORY_SCENES, value=3, step=1, label="Number of scenes", scale=3)
-                            script_btn = gr.Button("✍️ Write the script for me", variant="secondary", scale=2)
-                        story_script = gr.Textbox(
-                            label="Script (optional — written for you if empty)",
-                            placeholder=("Visual: waves crashing on a rocky shore\n"
-                                         "VO: Every wave carries a pinch of salt from the land.\n"
-                                         "Visual: rivers flowing into the sea\n"
-                                         "VO: Rivers have been doing this for millions of years."),
-                            lines=7,
-                            info="Each scene needs a 'Visual:' line and a 'VO:' line. Review AI drafts and verify factual claims before rendering.",
-                        )
+                        with gr.Accordion("Review or write my script (optional)", open=False):
+                            with gr.Row():
+                                story_scenes = gr.Slider(*STORY_SCENES, value=3, step=1, label="Number of scenes", scale=3)
+                                script_btn = gr.Button("✍️ Write the script for me", variant="secondary", scale=2)
+                            story_script = gr.Textbox(
+                                label="Script (optional — written for you if empty)",
+                                placeholder=("Visual: waves crashing on a rocky shore\n"
+                                             "VO: Every wave carries a pinch of salt from the land.\n"
+                                             "Visual: rivers flowing into the sea\n"
+                                             "VO: Rivers have been doing this for millions of years."),
+                                lines=7,
+                                info="Each scene needs a 'Visual:' line and a 'VO:' line. Review AI drafts and verify factual claims before rendering.",
+                            )
                         story_shape = gr.Radio(SHAPES, value="9:16", label="Shape")
                         (story_lang, story_voice, story_music, story_style,
                          _story_quality, story_subs, story_delivery) = _more_options("Calm", with_quality=False)
@@ -916,6 +939,14 @@ def build_app() -> gr.Blocks:
                 ).then(backend_status_html, None, backend_box)
                 folder_btn.click(open_videos_folder)
                 off_btn.click(turn_off, None, off_msg)
+
+        for button, destination in ((home_button, "home"), (edit_button, "flow_editor"),
+                                    (create_button, "story"), (quick_button, "clip"),
+                                    (voice_button, "voice"), (settings_button, "settings"),
+                                    (home_edit, "flow_editor"), (home_story, "story")):
+            button.click(lambda target=destination: gr.Tabs(selected=target), outputs=workspaces)
+        home_google.click(lambda: (gr.Tabs(selected="flow_editor"), gr.Accordion(open=True)),
+                          outputs=[workspaces, google_help])
 
         gr.HTML(f"<div id='vs-footer'>{DEVELOPER_ATTRIBUTION} · "
                 "<a href='https://github.com/Kamran5H/VideoStudio' target='_blank'>GitHub</a></div>")

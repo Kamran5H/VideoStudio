@@ -79,3 +79,13 @@ For a workflow without API keys, open the voiceover planning accordion in Google
 For the exact sound of your recorded voice, record or upload the complete narration in the live editor. This is a recording, not generated cloning. It replaces source sound, begins at the selected video's start, and is padded with silence if shorter. If longer, extend the selection or shorten the recording. Source mute does not mute this separately selected narration. SRT captions are provided separately and are not automatically transcribed from the recording.
 
 Automatic Flow transfer, production-grade Urdu voice cloning and face-aware subtitle tracking remain unfinished. Existing browser controls and the import workflow do not constitute a permanent account API connection.
+
+## Beginner interface
+
+The app now opens on Start with three choices: Use my Google plan, Edit a video I have, and Turn an idea into a story. Start with Google opens the editor's Google instructions. The top navigation provides Start, Edit a video and Make a story. AI clips, saved voice setup and Settings are under More tools.
+
+The editor follows Add your video → Make it yours → Preview & download. Add one file, optionally write a caption and choose a shape. Trim, voice/sound, subtitle appearance and joining several clips are collapsed optional sections. Download is enabled after adding a video. Live preview and full export behave as before.
+
+The story screen initially shows the topic, shape and make button. The script editor and scene-count controls are inside Review or write my script. Existing quality, voice, music and delivery controls remain inside More options.
+
+Navigation and screen layout were checked in a local browser. Restart the application to load the redesigned interface.
