@@ -2817,6 +2817,68 @@ class JobStatus:
     retries: int = 0                           # non-quota failures so far
     not_before: float = 0.0                    # deferred-until epoch (quota/network)
     deferrals: int = 0                         # quota/network deferrals so far
+    # Live activity: time-stamped record of everything the job did, shown in
+    # the "Live activity" panel. {"t": epoch, "level": info|warn|error|done,
+    # "stage": Stage value, "text": str}; newest last, capped.
+    activity: List[dict] = field(default_factory=list)
+    wait_kind: str = ""                        # why a QUEUED job waits: colab|quota|retry|""
+
+
+ACTIVITY_LIMIT = 200
+_ACTIVITY_LEVELS = ("info", "warn", "error", "done")
+
+
+def add_activity(job: JobStatus, text: str, level: str = "info", stage: Optional[Stage] = None) -> None:
+    """Append one line to a job's live activity (consecutive repeats are merged)."""
+    text = " ".join(str(text or "").split())[:300]
+    if not text:
+        return
+    level = level if level in _ACTIVITY_LEVELS else "info"
+    stage_value = (stage or job.stage).value
+    if any(entry.get("text") == text for entry in job.activity[-12:]):
+        return
+    job.activity.append({"t": time.time(), "level": level, "stage": stage_value, "text": text})
+    if len(job.activity) > ACTIVITY_LIMIT:
+        del job.activity[:-ACTIVITY_LIMIT]
+
+
+class _ThreadActivityHandler(logging.Handler):
+    """Routes log records written by a job queue's worker thread into the
+    activity of the job it is running, so warnings such as "Backend ltx23
+    quota-limited" appear in the Live activity panel too. One shared handler;
+    queues register and unregister their worker thread (no handler leaks)."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.sinks: Dict[int, Callable[[logging.LogRecord], None]] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        sink = self.sinks.get(record.thread or 0)
+        if sink:
+            try:
+                sink(record)
+            except Exception:
+                pass
+
+
+THREAD_ACTIVITY = _ThreadActivityHandler()
+log.addHandler(THREAD_ACTIVITY)
+
+
+def _load_activity(raw: Any) -> List[dict]:
+    if not isinstance(raw, list):
+        return []
+    entries = []
+    for item in raw[-ACTIVITY_LIMIT:]:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            try:
+                entries.append({"t": float(item.get("t", 0) or 0),
+                                "level": item.get("level") if item.get("level") in _ACTIVITY_LEVELS else "info",
+                                "stage": str(item.get("stage", "")), "text": item["text"][:300]})
+            except (TypeError, ValueError):
+                continue
+    return entries
+
 
 class JobQueue:
     """Thread-safe, persistent batch job queue with auto-resume and crash recovery."""
@@ -2831,6 +2893,7 @@ class JobQueue:
         self._jobs: Dict[str, JobStatus] = {}
         self._cancelled_jobs: set[str] = set()
         self._active_thread: Optional[threading.Thread] = None
+        self._current_job: Optional[JobStatus] = None     # the job the worker is running now
         self._running = False
         self._paused = False
         self._last_persist = 0.0
@@ -2958,6 +3021,8 @@ class JobQueue:
             retries=int(j_data.get("retries", 0) or 0),
             not_before=float(j_data.get("not_before", 0.0) or 0.0),
             deferrals=int(j_data.get("deferrals", 0) or 0),
+            activity=_load_activity(j_data.get("activity")),
+            wait_kind=str(j_data.get("wait_kind", "") or ""),
         )
 
     def _auto_resume_interrupted_jobs(self):
@@ -2976,6 +3041,8 @@ class JobQueue:
                     js.retries = 0
                     js.deferrals = 0
                     js.message = "Restored from previous session. Resuming from last saved checkpoint..."
+                    js.wait_kind = ""
+                    add_activity(js, "VideoStudio restarted; resuming from the last saved checkpoint", "warn")
                     has_pending = True
         if has_pending:
             self._save(force=True)
@@ -3004,6 +3071,8 @@ class JobQueue:
                     "retries": js.retries,
                     "not_before": js.not_before,
                     "deferrals": js.deferrals,
+                    "activity": js.activity,
+                    "wait_kind": js.wait_kind,
                 }
             payload = json.dumps(data, indent=2)
             tmp = self.queue_file.with_suffix(f".{os.getpid()}.tmp")
@@ -3023,6 +3092,8 @@ class JobQueue:
                 "This studio is view-only because another instance owns the job queue."
             )
         status = JobStatus(job_id=settings.job_id, settings=settings)
+        add_activity(status, f"Added to the queue ({'story video' if settings.mode == 'script_story' else 'AI clip'}, "
+                             f"{settings.aspect_ratio})")
         with self._lock:
             if settings.job_id in self._cancelled_jobs:
                 self._cancelled_jobs.remove(settings.job_id)
@@ -3041,6 +3112,7 @@ class JobQueue:
             if js:
                 js.stage = Stage.CANCELLED
                 js.message = "🛑 Job terminated by user."
+                add_activity(js, "Stopped by you; finished parts are kept for Try again", "warn")
                 self._save(force=True)
                 log.info("Job [%s] was explicitly terminated by user.", job_id)
                 return True
@@ -3066,6 +3138,8 @@ class JobQueue:
                 js.not_before = 0.0
                 js.error = None
                 js.message = "Re-queued. Resuming from checkpoint..."
+                js.wait_kind = ""
+                add_activity(js, "Try again pressed; resuming from the last saved checkpoint")
                 self._save(force=True)
                 self._ensure_worker()
                 return True
@@ -3110,7 +3184,27 @@ class JobQueue:
             self._active_thread.start()
 
     def _worker_loop(self):
+        THREAD_ACTIVITY.sinks[threading.get_ident()] = self._activity_from_log
+        try:
+            self._run_jobs()
+        finally:
+            THREAD_ACTIVITY.sinks.pop(threading.get_ident(), None)
+            self._current_job = None
+
+    def _activity_from_log(self, record: logging.LogRecord) -> None:
+        """Log lines written while a job runs become part of its live activity."""
+        job = getattr(self, "_current_job", None)
+        if job is None or record.levelno < logging.INFO:
+            return
+        text = record.getMessage()
+        if job.job_id in text:          # queue bookkeeping; recorded in plain words separately
+            return
+        level = "error" if record.levelno >= logging.ERROR else "warn" if record.levelno >= logging.WARNING else "info"
+        add_activity(job, text, level)
+
+    def _run_jobs(self):
         while self._running:
+            self._current_job = None
             if self._paused:
                 time.sleep(1.0)
                 continue
@@ -3137,6 +3231,10 @@ class JobQueue:
                 self._fail(pending_job, "Job has no saved settings and cannot be run.")
                 continue
 
+            self._current_job = pending_job
+            pending_job.wait_kind = ""
+            add_activity(pending_job, "Started" if pending_job.progress <= 0
+                         else "Continuing from the saved checkpoint")
             try:
                 self.studio.execute_job(pending_job, self._progress_callback)
                 if (pending_job.stage not in (Stage.DONE, Stage.FAILED, Stage.CANCELLED)
@@ -3148,6 +3246,7 @@ class JobQueue:
                 # Our own render is still running on Colab: check back soon.
                 # Not a quota wait, so no back-off and no deferral count.
                 pending_job.stage = Stage.QUEUED
+                pending_job.wait_kind = "colab"
                 pending_job.not_before = time.time() + max(5, int(pending.wait_seconds))
                 pending_job.message = f"⏳ {pending.reason}"
                 pending_job.error = None
@@ -3167,6 +3266,9 @@ class JobQueue:
                     int(getattr(self.studio.config, "quota_wait_cap_min", 45)) * 60)
                 at = time.strftime("%H:%M", time.localtime(pending_job.not_before))
                 pending_job.message = f"⏳ {quota.reason} — auto-retry at {at} (checkpoints saved)"
+                pending_job.wait_kind = "quota"
+                add_activity(pending_job, f"{quota.reason}. Waiting; trying again at {at} "
+                                          f"(wait {pending_job.deferrals} of {cap}, finished parts are kept)", "warn")
                 pending_job.error = None
                 self._save(force=True)
             except QualityError as exc:
@@ -3184,6 +3286,7 @@ class JobQueue:
                     pending_job.stage = Stage.FAILED
                     pending_job.error = str(e)[:500]
                     pending_job.message = f"❌ Failed after {cap} attempts: {str(e)[:80]}"
+                    add_activity(pending_job, f"Failed after {cap} attempts: {e}", "error")
                     log.error("Job %s permanently failed after %d attempts: %s", pending_job.job_id, cap, e)
                     self._save(force=True)
                     continue
@@ -3194,12 +3297,16 @@ class JobQueue:
                 pending_job.error = str(e)
                 pending_job.not_before = time.time() + 10  # brief backoff, unblocks queue
                 pending_job.message = f"⏳ Retry {pending_job.retries}/{cap}: {str(e)[:60]}"
+                pending_job.wait_kind = "retry"
+                add_activity(pending_job, f"Attempt {pending_job.retries} of {cap} hit a problem: {e}. "
+                                          "Trying again in 10 s from the saved checkpoint", "warn")
                 self._save(force=True)
 
     def _fail(self, job: JobStatus, reason: str) -> None:
         job.stage = Stage.FAILED
         job.error = reason[:500]
         job.message = f"❌ {reason[:120]}"
+        add_activity(job, reason, "error")
         log.error("Job %s failed: %s", job.job_id, reason)
         self._save(force=True)
 
@@ -3212,6 +3319,7 @@ class JobQueue:
             js.stage = stage
             js.progress = progress
             js.message = msg
+            add_activity(js, msg, "done" if stage == Stage.DONE else "info", stage)
             for k, v in kwargs.items():
                 if hasattr(js, k):
                     setattr(js, k, v)
@@ -3442,10 +3550,22 @@ class VideoStudio:
                 be = self.backends.get(b_name)
                 if not be or not be.available() or not be.supports(req):
                     continue
+                progress_cb(sett.job_id, Stage.GENERATING, chunk_prog,
+                            f"Clip {idx+1}/{total_chunks}: trying {be.description}")
+
+                def _backend_progress(m: str, _p: float = chunk_prog, idx: int = idx) -> None:
+                    # "step 7/20" from the Colab worker moves the bar inside this clip's share.
+                    step = re.search(r"step (\d+)/(\d+)", m)
+                    within = int(step.group(1)) / max(int(step.group(2)), 1) if step else 0.0
+                    progress_cb(sett.job_id, Stage.GENERATING, _p + 0.40 / total_chunks * min(within, 1.0),
+                                f"Clip {idx+1}/{total_chunks}: {m}")
+
                 try:
-                    be.generate(req, clip_out, lambda m, _p=chunk_prog: progress_cb(sett.job_id, Stage.GENERATING, _p, m))
+                    be.generate(req, clip_out, _backend_progress)
                     backend_used = be.name
                     success = True
+                    progress_cb(sett.job_id, Stage.GENERATING, chunk_prog + 0.40 / total_chunks,
+                                f"Clip {idx+1}/{total_chunks} ready ({be.description})")
                     break
                 except ColabRenderPending:
                     raise
@@ -3488,6 +3608,9 @@ class VideoStudio:
             if not success:
                 # Stock footage or animated still fallback
                 log.info("Engaging cinematic visual synthesis fallback for chunk %d...", idx)
+                progress_cb(sett.job_id, Stage.GENERATING, chunk_prog,
+                            f"Clip {idx+1}/{total_chunks}: no AI video service available; "
+                            "using stock footage or an AI picture with camera motion")
                 chunk_dur = chunk_secs     # match the AI chunk length so total duration is right
                 # Search with the user's own words: stock sites and Wikimedia
                 # find nothing for a 60-word styled prompt.
@@ -3714,7 +3837,7 @@ class VideoStudio:
                 )
 
             prog = 0.20 + 0.45 * (s_idx / len(scenes))
-            progress_cb(sett.job_id, Stage.GENERATING, prog, f"Processing scene {s_idx+1}/{len(scenes)}...")
+            progress_cb(sett.job_id, Stage.GENERATING, prog, f"Scene {s_idx+1}/{len(scenes)}: recording the narration")
 
             # Audio VO for scene
             vo_path_gen, events = self.audio_engine.generate_voiceover(
@@ -3739,9 +3862,15 @@ class VideoStudio:
                 })
             vo_files.append(vo_path)
 
+            progress_cb(sett.job_id, Stage.GENERATING, prog,
+                        f"Scene {s_idx+1}/{len(scenes)}: narration ready ({vo_dur:.1f} s); finding a visual for "
+                        f"\u201c{vis_prompt[:60]}\u201d")
             # Fetch visual asset
             asset_path, media_type = self.media_fetcher.fetch_scene_visual(
                 vis_prompt, w, h, prefer_video=True, style=sett.style_preset)
+            progress_cb(sett.job_id, Stage.GENERATING, prog,
+                        f"Scene {s_idx+1}/{len(scenes)}: {'video clip' if media_type == 'video' else 'picture'} found"
+                        + ("; building the scene" if media_type == "video" else "; adding camera motion"))
             reused_previous = previous_asset == (asset_path, media_type)
             previous_asset = (asset_path, media_type)
             (job_dir / f"scene_{s_idx:02d}.asset.json").write_text(json.dumps({
