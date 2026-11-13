@@ -541,6 +541,79 @@ def looks_like_prompt(text: str) -> bool:
 SCRIPT_RETRY_PAUSE = 6.0      # seconds between attempts at the free script writer
 
 
+# Writing system each narration language is spoken from. A script in another
+# writing system cannot be read by that language's voice: the narrator skips
+# it and the video comes out nearly silent.
+LANGUAGE_SCRIPTS: dict[str, str] = {
+    "English": "latin", "Spanish": "latin", "French": "latin", "German": "latin",
+    "Urdu": "arabic", "Arabic": "arabic", "Hindi": "devanagari", "Punjabi": "gurmukhi",
+    "Chinese": "cjk", "Japanese": "cjk",
+}
+SCRIPT_NAMES = {
+    "latin": "English letters", "arabic": "Urdu / Arabic script", "devanagari": "Hindi script",
+    "gurmukhi": "Punjabi (Gurmukhi) script", "cjk": "Chinese / Japanese characters",
+}
+
+
+def _char_script(ch: str) -> str:
+    code = ord(ch)
+    if ch.isascii():
+        return "latin" if ch.isalpha() else ""
+    if 0x00C0 <= code <= 0x024F:
+        return "latin"
+    if 0x0600 <= code <= 0x06FF or 0x0750 <= code <= 0x077F or 0xFB50 <= code <= 0xFDFF or 0xFE70 <= code <= 0xFEFF:
+        return "arabic"
+    if 0x0900 <= code <= 0x097F:
+        return "devanagari"
+    if 0x0A00 <= code <= 0x0A7F:
+        return "gurmukhi"
+    if 0x3040 <= code <= 0x30FF or 0x3400 <= code <= 0x9FFF:
+        return "cjk"
+    return ""
+
+
+def dominant_script(text: str) -> str:
+    """Writing system of most letters in `text` ('' when unclear or too short)."""
+    counts: dict[str, int] = {}
+    for ch in text or "":
+        family = _char_script(ch)
+        if family:
+            counts[family] = counts.get(family, 0) + 1
+    total = sum(counts.values())
+    if total < 8:
+        return ""
+    family, top = max(counts.items(), key=lambda item: item[1])
+    return family if top / total >= 0.6 else ""
+
+
+def language_mismatch(text: str, language: str) -> str:
+    """Plain name of the writing system `text` is in when the `language` voice
+    cannot read it ('' when they agree or it cannot be told)."""
+    expected = LANGUAGE_SCRIPTS.get(language)
+    found = dominant_script(text)
+    if not expected or not found or found == expected:
+        return ""
+    return SCRIPT_NAMES[found]
+
+
+def spoken_lines(script: str) -> str:
+    """Only the narration (VO) text of a Visual:/VO: script."""
+    lines = re.findall(r"(?im)^\W*(?:vo|voiceover|narration)\W*:\s*(.+)$", script or "")
+    return "\n".join(lines)
+
+
+def check_narration_length(text: str, seconds: float, language: str) -> None:
+    """Fail loudly when the narrator produced far less speech than the text
+    needs. That happens when the voice cannot read the script's writing system,
+    and would otherwise finish as a near-silent video with broken captions."""
+    words = len((text or "").split())
+    if words >= 4 and seconds < words * 0.08:
+        raise QualityError(
+            f"The {language} narrator could not read this text (only {seconds:.1f}s of speech for {words} words). "
+            "Make sure the Language matches the language your script is written in."
+        )
+
+
 def looks_like_script(text: str, scene_count: Optional[int] = None) -> bool:
     """A usable storyboard reply: labelled Visual:/VO: lines, not an error page."""
     t = (text or "").strip()
@@ -600,7 +673,11 @@ class FreeLLMPromptEnhancer:
     """Prompt and storyboard drafting with configured providers and offline fallback."""
 
     @staticmethod
-    def expand_with_ai(prompt: str, style: str = "Cinematic", config: Optional[StudioConfig] = None) -> str:
+    def expand_with_ai(prompt: str, style: str = "Cinematic", config: Optional[StudioConfig] = None,
+                       timeout: float = 6, offline_fallback: bool = True) -> str:
+        """Rewrite an idea as one video shot. `timeout` bounds the free service
+        (it often needs 10-20 s). With `offline_fallback=False` an empty string
+        is returned when no AI service answered, instead of the style template."""
         clean_p = prompt.strip()
         if not clean_p:
             return ""
@@ -645,14 +722,14 @@ class FreeLLMPromptEnhancer:
                 f"Rewrite as a single 50-word {style} video shot. Preserve the subject, action, "
                 f"setting and time of day exactly. No extra subjects or commentary. Idea: {clean_p}"
             )
-            resp = requests.get(f"https://text.pollinations.ai/{q_enc}", timeout=6)
+            resp = requests.get(f"https://text.pollinations.ai/{q_enc}", timeout=timeout)
             if resp.status_code == 200 and looks_like_prompt(resp.text):
                 return resp.text.strip().replace('"', '')
         except Exception:
             pass
 
         # 3. Deterministic Master Cinematic Prompt Engine (Offline, 0ms, Zero Cost)
-        return PromptEngine().enhance(clean_p, preset=style)
+        return PromptEngine().enhance(clean_p, preset=style) if offline_fallback else ""
 
     @staticmethod
     def generate_script(topic: str, scene_count: int = 4, language: str = "English", config: Optional[StudioConfig] = None) -> str:
@@ -661,6 +738,11 @@ class FreeLLMPromptEnhancer:
         if not prompt:
             return ""
         scene_count = max(1, min(int(scene_count), 6))
+
+        def usable(reply: str) -> bool:
+            # Right shape AND narration in the requested language: free models
+            # sometimes answer in another language, which the voice cannot read.
+            return looks_like_script(reply, scene_count) and not language_mismatch(spoken_lines(reply), language)
 
         cfg = config or StudioConfig.load()
         gemini_key = cfg.gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -672,7 +754,6 @@ class FreeLLMPromptEnhancer:
                 client = genai.Client(api_key=gemini_key)
                 sys_inst = (
                     f"You are an award-winning documentary & cinematic video director. "
-                    f"For Urdu, use natural Pakistani Urdu vocabulary in Urdu script, avoiding Sanskritized Hindi wording. "
                     f"Write an engaging {scene_count}-scene video script about '{prompt}' in {language}. "
                     "For each scene, structure it EXACTLY as:\n\n"
                     "Visual: [3-5 concrete visual keywords for footage or image generation, e.g., golden sunrise mountains drone aerial]\n"
@@ -689,7 +770,7 @@ class FreeLLMPromptEnhancer:
                             model=model_name,
                             contents=sys_inst
                         )
-                        if resp.text and looks_like_script(resp.text, scene_count):
+                        if resp.text and usable(resp.text):
                             return resp.text.strip()
                     except Exception:
                         continue
@@ -704,8 +785,7 @@ class FreeLLMPromptEnhancer:
             ask = (
                 f"Write a {scene_count}-scene video script about '{prompt}'. For each scene output exactly "
                 "two lines. Visual: 3-6 English keywords for stock footage. "
-                f"VO: 1-2 sentences of spoken narration in {language}. "
-                "For Urdu use Urdu script and natural Pakistani Urdu vocabulary, not Sanskritized Hindi. "
+                f"VO: 1-2 sentences of spoken narration, written ONLY in {language}. "
                 "Use distinct, topic-specific scenes with a hook, explanation and payoff. "
                 "Do not invent statistics, quotes or factual claims. "
                 "Output only the Visual: and VO: lines, no titles, no numbering."
@@ -719,7 +799,7 @@ class FreeLLMPromptEnhancer:
                 try:
                     resp = requests.get(url, timeout=60)
                     text = resp.text.strip() if resp.status_code == 200 else ""
-                    if looks_like_script(text, scene_count):
+                    if usable(text):
                         return text
                     log.info("Free script writer gave no usable script (HTTP %s)", resp.status_code)
                 except requests.RequestException as exc:
@@ -1497,15 +1577,26 @@ class MediaFetcher:
                             return got
         return None
 
+    @staticmethod
+    def image_request_size(width: int, height: int) -> Tuple[int, int]:
+        """Size to ask the free image model for. It works at about one
+        megapixel whatever is requested, and frames narrower than 3:4 often
+        come back as two pictures stacked on top of each other. So ask for at
+        most 1024 px on the long edge and never narrower than 3:4; the still
+        is cover-cropped to the video frame afterwards."""
+        width, height = max(int(width), 64), max(int(height), 64)
+        if width / height < 0.75:
+            return 768, 1024
+        scale = min(1.0, 1024 / max(width, height))
+        return max(64, int(width * scale) // 64 * 64), max(64, int(height * scale) // 64 * 64)
+
     def _generate_pollinations_image(self, prompt: str, width: int, height: int, style: str) -> Optional[str]:
         import urllib.parse
         # Callers may pass an already-styled prompt (the AI-clip fallback does).
         styled = "Visual treatment:" in prompt or any(prompt.startswith(p["prefix"]) for p in STYLE_PRESETS.values())
         enhanced = prompt if styled else PromptEngine().enhance(prompt, preset=style)
         encoded = urllib.parse.quote(enhanced[:1500])
-        # Snap dimensions to valid multiples
-        w = (width // 64) * 64
-        h = (height // 64) * 64
+        w, h = self.image_request_size(width, height)
         out = self.cache_dir / f"flux_{uuid.uuid4().hex[:8]}.jpg"
         # The free tier serves one image at a time per address and answers
         # 429 to anything faster, so back off and try again.
@@ -3170,6 +3261,8 @@ class VideoStudio:
         vo_dur = ffprobe_duration(vo_file) if vo_file and Path(vo_file).exists() else 0.0
         if vo_text and vo_dur <= 0:
             raise QualityError("The narration service returned unusable audio. Retry the render.")
+        if vo_text:
+            check_narration_length(vo_text, vo_dur, sett.language)
         if vo_text and not events:
             events = estimate_word_events(vo_text, vo_dur)
         # If the narration runs longer than the footage, hold the last frame so
@@ -3306,6 +3399,7 @@ class VideoStudio:
             vo_dur = ffprobe_duration(vo_path)
             if vo_dur <= 0:
                 raise QualityError(f"Scene {s_idx + 1} has no usable narration. Retry the render.")
+            check_narration_length(vo_prompt, vo_dur, sett.language)
             scene_dur = scene_video_seconds(vo_dur)
             if not events:
                 events = estimate_word_events(vo_prompt, vo_dur)

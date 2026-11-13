@@ -35,7 +35,9 @@ from video_studio import (
     QualityError,
     Stage,
     VideoStudio,
+    language_mismatch,
     log,
+    spoken_lines,
 )
 
 STUDIO = VideoStudio()
@@ -245,7 +247,10 @@ def queue_wait_label(job: JobStatus, jobs: List[JobStatus], now: Optional[float]
 
 def readable_job_message(job: JobStatus) -> str:
     if job.stage == Stage.FAILED:
-        return "This video could not be finished. Open the details below to see why."
+        reason = " ".join((job.error or "").split())
+        if not reason:
+            return "This video could not be finished. Press Try again."
+        return f"This video could not be finished. {reason[:220]}{'…' if len(reason) > 220 else ''}"
     if job.stage == Stage.CANCELLED:
         return "You stopped this video. Press Try again to continue it."
     if job.stage == Stage.QUEUED and job.error:
@@ -382,17 +387,26 @@ def tab_state(mode: str) -> tuple:
     return (card_for_job(shown) if shown else idle_card(IDLE_TEXT)), video, "", False, False
 
 
+def _files_update(video_path: str, changed: bool):
+    if not changed:
+        return gr.skip()
+    files = files_for_video(video_path)
+    return gr.update(value=files, visible=bool(files))
+
+
 def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> tuple:
     """Timer/refresh hook: update both screens; reload a video only when it changed."""
     clip_card, clip_video, clip_id, clip_stop, clip_retry = tab_state("ai_video")
     story_card, story_video, story_id, story_stop, story_retry = tab_state("script_story")
     clip_path, story_path = str(clip_video or ""), str(story_video or "")
+    clip_new = bool(clip_path) and clip_path != last_clip_video
+    story_new = bool(story_path) and story_path != last_story_video
     return (
         clip_card,
-        clip_video if clip_path and clip_path != last_clip_video else gr.skip(),
+        clip_video if clip_new else gr.skip(),
         clip_id,
         story_card,
-        story_video if story_path and story_path != last_story_video else gr.skip(),
+        story_video if story_new else gr.skip(),
         story_id,
         clip_path or last_clip_video,
         story_path or last_story_video,
@@ -400,6 +414,8 @@ def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> t
         gr.update(visible=clip_retry),
         gr.update(visible=story_stop),
         gr.update(visible=story_retry),
+        _files_update(clip_path, clip_new),
+        _files_update(story_path, story_new),
     )
 
 
@@ -470,7 +486,7 @@ def build_story_settings(topic, script, shape, language, voice, music, subtitles
 # ---------------------------------------------------------------------------
 
 VIEW_ONLY = "⚠️ Another VideoStudio window is already running and owns the queue. Use that one."
-STARTED = "⏳ Making your video… you can leave this page open or refresh it."
+STARTED = "✅ Started. Follow it in the card on the right; you can leave or refresh this page."
 
 
 def my_voice_problem(sett: JobSettings) -> str:
@@ -483,16 +499,26 @@ def my_voice_problem(sett: JobSettings) -> str:
     return f"🎙️ My voice cannot be used: {reason}. Fix that, or choose Female or Male under More options." if reason else ""
 
 
+def language_problem(sett: JobSettings) -> str:
+    """The narrator can only read text written in its own language's script."""
+    spoken = spoken_lines(sett.script_text) if sett.mode == "script_story" else sett.voice_script
+    found = language_mismatch(spoken, sett.language)
+    if not found:
+        return ""
+    return (f"🗣️ Your narration is written in {found}, but Language is set to {sett.language}. "
+            "Change Language to match your text, then press Make my video again.")
+
+
 def _submit(sett: JobSettings) -> tuple:
     """Queue a job; returns (status_text, card_html, job_id). The page timer
     follows the job from here, so a refresh never loses it."""
-    problem = my_voice_problem(sett)
+    problem = language_problem(sett) or my_voice_problem(sett)
     if problem:
         return problem, gr.skip(), gr.skip()
     job_id = STUDIO.queue.submit(sett)
     status = STUDIO.queue.get_status(job_id)
     others = [j for j in STUDIO.queue.all_jobs() if j.stage not in TERMINAL and j.job_id != job_id]
-    text = STARTED if not others else f"⏳ Added to the queue — {len(others)} video(s) ahead of this one."
+    text = STARTED if not others else f"✅ Added to the queue, {len(others)} video(s) ahead of this one."
     return text, (card_for_job(status) if status else gr.skip()), job_id
 
 
@@ -518,7 +544,12 @@ def improve_idea(prompt: str, style: str) -> str:
     if not text:
         gr.Warning("Type your idea first, then I can improve it.")
         return prompt
-    return FreeLLMPromptEnhancer.expand_with_ai(text, _choice(style, STYLES, "Cinematic"), STUDIO.config)
+    better = FreeLLMPromptEnhancer.expand_with_ai(
+        text, _choice(style, STYLES, "Cinematic"), STUDIO.config, timeout=30, offline_fallback=False)
+    if not better:
+        gr.Warning("The AI helper is busy right now. Your idea is kept as you wrote it; you can still make the video.")
+        return prompt
+    return better
 
 
 def write_script(topic: str, scenes, language: str) -> str:
@@ -564,8 +595,9 @@ def library_choices() -> List[tuple]:
         sett = job.settings
         when = time.strftime("%d %b, %H:%M", time.localtime(sett.created_at)) if sett else ""
         kind = "Story" if sett and sett.mode == "script_story" else "AI clip"
-        title = (sett.prompt if sett else "Video").strip().replace("\n", " ")[:50] or "Video"
-        choices.append((f"{title} · {kind} · {when}", job.job_id))
+        title = " ".join((sett.prompt if sett else "").split()) or "Video"
+        title = title if len(title) <= 34 else title[:33].rstrip() + "…"
+        choices.append((f"{when} · {kind} · {title}", job.job_id))
     return choices
 
 
@@ -588,7 +620,7 @@ def library_refresh(selected: Any = None) -> tuple:
     ids = [job_id for _, job_id in choices]
     pick = selected if selected in ids else (ids[0] if ids else None)
     video, files = library_show(pick)
-    note = (f"{len(ids)} finished video(s). They are saved in `{DEFAULT_OUTPUT_DIR / 'videos'}`."
+    note = (f"{len(ids)} finished video{'s' if len(ids) != 1 else ''}, newest first."
             if ids else "No finished videos yet. Make a story or an AI clip and it will show up here.")
     return gr.update(choices=choices, value=pick), video, files, note
 
@@ -783,7 +815,6 @@ def _more_options(default_music: str, with_quality: bool):
     """Shared 'More options' controls; returns them in a fixed order."""
     with gr.Accordion("More options (voice, music, look)", open=False):
         with gr.Row():
-            language = gr.Dropdown(LANGUAGES, value="English", label="Voice language")
             voice = gr.Radio(VOICES, value=default_voice(), label="Voice")
             music = gr.Dropdown(MUSIC, value=default_music, label="Background music")
         with gr.Row():
@@ -792,7 +823,7 @@ def _more_options(default_music: str, with_quality: bool):
                                   info="Higher sizes are upscaled: larger files, slower renders.")
             delivery = gr.Dropdown(DELIVERIES, value="Engaging", label="Narrator delivery")
         subtitles = gr.Checkbox(value=True, label="Show subtitles on the video")
-    return language, voice, music, style, quality, subtitles, delivery
+    return voice, music, style, quality, subtitles, delivery
 
 
 def _result_panel(height: int):
@@ -804,11 +835,6 @@ def _result_panel(height: int):
     video = gr.Video(label="Your video", interactive=False, height=height)
     files = gr.File(label="Captions and render report", file_count="multiple", interactive=False, visible=False)
     return card, stop, retry, video, files
-
-
-def _show_files(video_path: Optional[str]):
-    files = files_for_video(video_path)
-    return gr.update(value=files, visible=bool(files))
 
 
 def editor_render(path, start, end, shape, muted, caption, srt, position, size, narration=None, preview=True):
@@ -909,7 +935,7 @@ def build_flow_workspace():
                 gr.Markdown("Preview shows the first 8 seconds. The finished video is your full selection.",
                             elem_classes=["vs-hint"])
         inputs = [source, start, end, shape, muted, caption, srt, position, size, narration]
-        live = dict(concurrency_id="local_editor", concurrency_limit=1)
+        live: dict[str, Any] = {"concurrency_id": "local_editor", "concurrency_limit": 1}
         source.change(lambda path: (gr.update(interactive=bool(path)), gr.update(interactive=bool(path))),
                       source, [export, refresh], queue=False)
         join.click(editor_join, [uploads, order], [source, join_status], **live)
@@ -986,11 +1012,12 @@ def build_app() -> gr.Blocks:
                             label="What is your video about?",
                             placeholder="e.g. Why the ocean is salty",
                         )
+                        story_lang = gr.Dropdown(LANGUAGES, value="English", label="Language",
+                                                 info="The script is written and spoken in this language.")
                         story_shape = gr.Radio(SHAPES, value="9:16", label="Shape")
                         with gr.Accordion("Review or write my script (optional)", open=False):
-                            with gr.Row():
-                                story_scenes = gr.Slider(*STORY_SCENES, value=3, step=1, label="Number of scenes", scale=3)
-                                script_btn = gr.Button("✍️ Write the script for me", variant="secondary", scale=2)
+                            story_scenes = gr.Slider(*STORY_SCENES, value=3, step=1, label="Number of scenes")
+                            script_btn = gr.Button("✍️ Write the script for me", variant="secondary")
                             story_script = gr.Textbox(
                                 label="Script (written for you if empty)",
                                 placeholder=("Visual: waves crashing on a rocky shore\n"
@@ -1000,7 +1027,7 @@ def build_app() -> gr.Blocks:
                                 lines=7,
                                 info="Each scene needs a 'Visual:' line and a 'VO:' line. Check facts in AI drafts before rendering.",
                             )
-                        (story_lang, story_voice, story_music, story_style,
+                        (story_voice, story_music, story_style,
                          _story_quality, story_subs, story_delivery) = _more_options("Calm", with_quality=False)
                         story_make = gr.Button("🎬 Make my video", variant="primary", elem_classes=["vs-make"])
                         story_status = gr.Markdown()
@@ -1018,7 +1045,6 @@ def build_app() -> gr.Blocks:
                 )
                 story_stop.click(stop_job, story_job_id, story_status)
                 story_retry.click(retry_job, story_job_id, story_status)
-                story_video.change(_show_files, story_video, story_files)
 
             # ---------------------------------------------------------- AI clip
             with gr.Tab("🎬 AI clip", id="clip"):
@@ -1038,7 +1064,8 @@ def build_app() -> gr.Blocks:
                             placeholder="Words to be spoken over the video. Leave empty for music only.",
                             lines=2,
                         )
-                        (clip_lang, clip_voice, clip_music, clip_style,
+                        clip_lang = gr.Dropdown(LANGUAGES, value="English", label="Narration language")
+                        (clip_voice, clip_music, clip_style,
                          clip_quality, clip_subs, clip_delivery) = _more_options("Ambient", with_quality=True)
                         clip_make = gr.Button("🎬 Make my video", variant="primary", elem_classes=["vs-make"])
                         clip_status = gr.Markdown()
@@ -1057,7 +1084,6 @@ def build_app() -> gr.Blocks:
                 )
                 clip_stop.click(stop_job, clip_job_id, clip_status)
                 clip_retry.click(retry_job, clip_job_id, clip_status)
-                clip_video.change(_show_files, clip_video, clip_files)
 
             # ---------------------------------------------------------- My videos
             with gr.Tab("📁 My videos", id="library") as library_tab:
@@ -1167,7 +1193,8 @@ def build_app() -> gr.Blocks:
 
         # Reconnect to running/finished jobs after a refresh, then keep in sync.
         sync_outputs = [clip_card, clip_video, clip_job_id, story_card, story_video, story_job_id,
-                        last_clip_video, last_story_video, clip_stop, clip_retry, story_stop, story_retry]
+                        last_clip_video, last_story_video, clip_stop, clip_retry, story_stop, story_retry,
+                        clip_files, story_files]
         sync_inputs = [last_clip_video, last_story_video]
         app.load(sync_job_outputs, sync_inputs, sync_outputs)
         gr.Timer(2.0).tick(sync_job_outputs, sync_inputs, sync_outputs, show_progress="hidden")
