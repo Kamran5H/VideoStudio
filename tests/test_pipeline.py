@@ -337,10 +337,13 @@ class BackendTimeoutTests(unittest.TestCase):
         be = vs.ColabBackend(cfg)
         self.assertTrue(be.available())
         self.assertEqual(be._normalized_url(), "https://demo.gradio.live")
-        be._client = object()
+        class BrokenClient:
+            def submit(self, *a, **k):
+                raise RuntimeError("boom")
+
+        be._client = BrokenClient()
         be._client_url = "https://demo.gradio.live"
-        with patch.object(be, "_get_client", return_value=be._client), \
-             patch.object(be, "_predict", side_effect=RuntimeError("boom")):
+        with patch.object(be, "_get_client", return_value=be._client):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 be.generate(vs.GenerationRequest(prompt="test"), Path("out.mp4"))
         self.assertIsNone(be._client)
@@ -379,7 +382,8 @@ class BackendTimeoutTests(unittest.TestCase):
         with patch("requests.get", side_effect=requests.ConnectionError("down")):
             self.assertEqual(be.check_connection(), (False, "unreachable (ConnectionError)"))
 
-        self.assertGreaterEqual(vs.ColabBackend.PREDICT_TIMEOUT, 1800)
+        # Polled in short slices; the render itself may take up to an hour.
+        self.assertGreaterEqual(vs.ColabBackend.MAX_PENDING_SECONDS, 1800)
 
     def test_colab_worker_notebook_and_t4_sdpa_fallback(self):
         import ast

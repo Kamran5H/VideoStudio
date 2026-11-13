@@ -1139,23 +1139,22 @@ class GenerationBackend:
             pass
         return None
 
+class ColabRenderPending(QuotaExhausted):
+    """A submitted Colab request can be polled again without resubmitting it."""
+
+
 class ColabBackend(GenerationBackend):
     name = "colab"
     description = "Free Google Colab T4 GPU Worker (Wan2.1)"
-    # A T4 needs about a minute per step for a 5.5 s chunk (the worker caps it
-    # at 25 steps), plus CPU text encoding; L4/A100 finish in a few minutes.
-    # This is how long the worker may show NO sign of life (no queue move, no
-    # new step). While steps keep advancing the studio keeps waiting, up to
-    # MAX_WAIT: a fixed limit used to abandon slow T4 renders that were
-    # still working, and the re-sent request then queued behind them.
-    PREDICT_TIMEOUT = 2700
-    MAX_WAIT = 3 * 3600
-    POLL_SECONDS = 15.0
+    # Poll in short intervals while retaining the remote request across queue deferrals.
+    PREDICT_TIMEOUT = 120
+    MAX_PENDING_SECONDS = 3600
 
     def __init__(self, config: StudioConfig):
         self.config = config
         self._client: Any = None
         self._client_url = ""
+        self._pending: tuple[Any, Any, float] | None = None
 
     def _normalized_url(self) -> str:
         return self.config.colab_url.strip().rstrip("/")
@@ -1229,49 +1228,6 @@ class ColabBackend(GenerationBackend):
             return (code,), "Colab worker: rendering..."
         return (code, rank), ""
 
-    @classmethod
-    def _predict(cls, client: Any, *args: Any, timeout: Optional[float] = None,
-                 progress: Optional[Callable[[str], None]] = None, **kwargs: Any) -> Any:
-        """Submit to the Colab worker and wait while it shows signs of life.
-
-        Gives up (as a transient 'timed out' error, so the job is deferred and
-        retried) only when the worker has not moved for `timeout` seconds
-        (default PREDICT_TIMEOUT) or the total wait passes MAX_WAIT. A queued
-        request is cancelled on give-up so it does not run later for nobody."""
-        idle_limit = timeout or cls.PREDICT_TIMEOUT
-        report = progress or (lambda m: None)
-        job = client.submit(*args, **kwargs)
-        started = last_change = time.monotonic()
-        last_sig: Any = object()
-        while True:
-            try:
-                return job.result(timeout=cls.POLL_SECONDS)
-            except (TimeoutError, concurrent.futures.TimeoutError):
-                pass
-            try:
-                status = job.status()
-            except Exception:
-                status = None
-            sig, msg = cls._describe_status(status)
-            now = time.monotonic()
-            if isinstance(sig, tuple) and sig[0] in ("IN_QUEUE", "JOINING_QUEUE"):
-                # Waiting behind another render is normal (a render cannot be
-                # stopped once started); only MAX_WAIT bounds it.
-                last_change = now
-            if sig != last_sig:
-                last_sig, last_change = sig, now
-                if msg:
-                    report(msg)
-            idle, total = now - last_change, now - started
-            if idle > idle_limit or total > cls.MAX_WAIT:
-                try:
-                    job.cancel()
-                except Exception:
-                    pass
-                why = (f"no progress for {int(idle // 60)} min" if idle > idle_limit
-                       else f"still not finished after {int(total // 60)} min")
-                raise TimeoutError(f"colab: {why} (timed out)")
-
     @staticmethod
     def _snap_wan13b(w: int, h: int) -> tuple[int, int]:
         """Wan2.1-T2V-1.3B only supports 832x480 (landscape) and 480x832
@@ -1282,23 +1238,53 @@ class ColabBackend(GenerationBackend):
 
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
         w, h = self._snap_wan13b(req.width, req.height)
-        progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {req.steps} steps...")
+        steps = min(req.steps, 20)
+        args = (req.prompt, req.negative_prompt, w, h, req.num_frames,
+                steps, req.guidance, req.seed)
+        key = (self._normalized_url(), out_path)
+        if self._pending is not None:
+            previous_key, job, started = self._pending
+            if previous_key != key:
+                if not job.done() and time.monotonic() - started < self.MAX_PENDING_SECONDS:
+                    raise ColabRenderPending(30, reason="Colab is finishing an earlier clip")
+                self._pending = None
+        if self._pending is None:
+            try:
+                client = self._get_client()
+                progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {steps} steps...")
+                self._pending = (key, client.submit(*args, api_name="/generate"), time.monotonic())
+            except Exception:
+                # A dead or expired worker URL: drop the broken connection so
+                # the next attempt (or a new URL) starts fresh.
+                self.reset_client()
+                raise
+        _, job, started = self._pending
+        remaining = max(1, self.MAX_PENDING_SECONDS - (time.monotonic() - started))
         try:
-            client = self._get_client()
-            result = self._predict(
-                client,
-                req.prompt, req.negative_prompt, w, h,
-                req.num_frames, req.steps, req.guidance, req.seed,
-                api_name="/generate", progress=progress,
-            )
-            v_path = self._extract_video(result)
-            if not v_path:
-                raise RuntimeError(f"Colab returned invalid video response: {result}")
+            result = job.result(timeout=min(self.PREDICT_TIMEOUT, remaining))
+        except (TimeoutError, concurrent.futures.TimeoutError) as exc:
+            if not job.done() and time.monotonic() - started < self.MAX_PENDING_SECONDS:
+                try:
+                    _, msg = self._describe_status(job.status())
+                except Exception:
+                    msg = ""
+                if msg:
+                    progress(msg)
+                reason = msg.replace("Colab worker: ", "Colab: ") if msg else "Colab is still rendering this clip"
+                raise ColabRenderPending(15, reason=reason) from exc
+            self._pending = None
+            raise TimeoutError("Colab render timed out") from exc
         except Exception:
+            self._pending = None
             self.reset_client()
             raise
+        self._pending = None
+        v_path = self._extract_video(result)
+        if not v_path:
+            raise RuntimeError("Colab returned an invalid video response")
         shutil.copyfile(v_path, out_path)
         return out_path
+
 
 class LTXSpaceBackend(GenerationBackend):
     name = "ltx"
@@ -3158,6 +3144,14 @@ class JobQueue:
                     # Pipeline returned without a result: never leave it QUEUED,
                     # or the worker would spin on it forever.
                     self._fail(pending_job, "Pipeline finished without producing a video.")
+            except ColabRenderPending as pending:
+                # Our own render is still running on Colab: check back soon.
+                # Not a quota wait, so no back-off and no deferral count.
+                pending_job.stage = Stage.QUEUED
+                pending_job.not_before = time.time() + max(5, int(pending.wait_seconds))
+                pending_job.message = f"⏳ {pending.reason}"
+                pending_job.error = None
+                self._save(force=True)
             except QuotaExhausted as quota:
                 # Free-GPU quota / transient network — defer and auto-resume when
                 # the window replenishes. Finished chunks stay on disk, so the
@@ -3453,6 +3447,8 @@ class VideoStudio:
                     backend_used = be.name
                     success = True
                     break
+                except ColabRenderPending:
+                    raise
                 except QuotaExhausted as q:
                     quota_hint = max(quota_hint, int(q.wait_seconds))
                     needs_token = needs_token or quota_needs_token(str(q))

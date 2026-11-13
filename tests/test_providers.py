@@ -219,67 +219,84 @@ def _status(code, index=None, rank=None, length=25):
     return types.SimpleNamespace(code=types.SimpleNamespace(name=code), rank=rank, progress_data=units)
 
 
-class ScriptedJob:
-    """A submitted Colab job whose status changes on every poll."""
+class PendingJob:
+    """A Colab job submitted once; reports progress until it is finished."""
 
-    def __init__(self, statuses, finish_after=None):
-        self.statuses, self.finish_after, self.polls, self.cancelled = statuses, finish_after, 0, False
+    def __init__(self, statuses, finish_after):
+        self.statuses, self.finish_after, self.polls, self.finished = statuses, finish_after, 0, False
+
+    def done(self):
+        return self.finished
 
     def result(self, timeout=None):
-        if self.finish_after is not None and self.polls >= self.finish_after:
-            return "/tmp/clip.mp4"
+        if self.polls >= self.finish_after:
+            self.finished = True
+            return self.path
+        self.polls += 1
         raise TimeoutError()
 
     def status(self):
-        st = self.statuses[min(self.polls, len(self.statuses) - 1)]
-        self.polls += 1
-        return st
-
-    def cancel(self):
-        self.cancelled = True
+        return self.statuses[min(self.polls, len(self.statuses)) - 1]
 
 
-class ColabWaitTests(unittest.TestCase):
-    """From the user's log: a slow T4 render was abandoned at a fixed 30 min."""
+class ColabPendingTests(unittest.TestCase):
+    """From the user's log: a slow T4 render was abandoned and re-sent."""
 
-    def _wait(self, job, idle=15, max_wait=10_000):
-        clock = [0.0]
-
-        def tick():
-            clock[0] += 5.0           # every look at the clock is 5 s later
-            return clock[0]
-
-        client = types.SimpleNamespace(submit=lambda *a, **k: job)
+    def test_progress_is_shown_and_the_same_request_is_polled_not_resent(self):
+        tmp = Path(tempfile.mkdtemp())
+        clip = tmp / "remote.mp4"
+        clip.write_bytes(b"video")
+        job = PendingJob([_status("IN_QUEUE", rank=0), _status("PROGRESS", 7, length=20)], finish_after=2)
+        job.path = str(clip)
+        submits = []
+        client = types.SimpleNamespace(submit=lambda *a, **k: submits.append(a) or job)
+        be = vs.ColabBackend(vs.StudioConfig(colab_url="https://x.gradio.live"))
+        req = vs.GenerationRequest(prompt="lions", width=480, height=832, steps=30, seed=4)
         messages = []
-        with patch.object(vs.ColabBackend, "POLL_SECONDS", 0), patch.object(vs.ColabBackend, "MAX_WAIT", max_wait), \
-                patch.object(vs.time, "monotonic", tick):
-            result = vs.ColabBackend._predict(client, "p", api_name="/generate", timeout=idle,
-                                              progress=messages.append)
-        return result, messages
+        with patch.object(be, "_get_client", return_value=client):
+            with self.assertRaises(vs.ColabRenderPending) as first:
+                be.generate(req, tmp / "out.mp4", messages.append)
+            self.assertIn("yours is next", first.exception.reason)
+            with self.assertRaises(vs.ColabRenderPending) as second:
+                be.generate(req, tmp / "out.mp4", messages.append)
+            self.assertEqual(second.exception.reason, "Colab: rendering, step 7/20")
+            out = be.generate(req, tmp / "out.mp4", messages.append)
+        self.assertEqual(out.read_bytes(), b"video")
+        self.assertEqual(len(submits), 1)                 # never re-sent while pending
+        self.assertIn("Colab worker: rendering, step 7/20", messages)
 
-    def test_a_render_that_keeps_stepping_is_never_abandoned(self):
-        job = ScriptedJob([_status("PROGRESS", i) for i in range(25)], finish_after=25)
-        result, messages = self._wait(job)            # 25 polls ~ far beyond the 15 s idle limit
-        self.assertEqual(result, "/tmp/clip.mp4")
-        self.assertIn("Colab worker: rendering, step 24/25", messages)
+    def test_status_messages(self):
+        describe = vs.ColabBackend._describe_status
+        self.assertEqual(describe(_status("IN_QUEUE", rank=2))[1],
+                         "Colab worker: finishing an earlier render; 2 more request(s) before yours")
+        self.assertEqual(describe(_status("PROCESSING"))[1], "Colab worker: rendering...")
+        self.assertEqual(describe(None), (None, ""))
 
-    def test_waiting_behind_an_earlier_render_is_not_a_stall(self):
-        job = ScriptedJob([_status("IN_QUEUE", rank=0)] * 10 + [_status("PROGRESS", 1)], finish_after=12)
-        result, messages = self._wait(job)
-        self.assertEqual(result, "/tmp/clip.mp4")
-        self.assertIn("finishing an earlier render", messages[0])
 
-    def test_a_frozen_worker_is_given_up_as_transient_and_cancelled(self):
-        job = ScriptedJob([_status("PROGRESS", 3)])
-        with self.assertRaises(TimeoutError) as ctx:
-            self._wait(job)
-        self.assertTrue(job.cancelled)
-        self.assertTrue(vs.is_transient_error(str(ctx.exception)))
+class PendingDeferralTests(unittest.TestCase):
+    def test_a_pending_colab_render_is_checked_soon_and_not_counted_as_a_quota_wait(self):
+        import time as real_time
 
-    def test_total_wait_is_still_bounded(self):
-        job = ScriptedJob([_status("PROGRESS", i) for i in range(1000)])
-        with self.assertRaisesRegex(TimeoutError, "still not finished"):
-            self._wait(job, max_wait=100)
+        studio = types.SimpleNamespace(config=vs.StudioConfig())
+        queue = object.__new__(vs.JobQueue)
+        job = vs.JobStatus(job_id="j1", settings=vs.JobSettings(prompt="p"))
+        queue.studio, queue._jobs, queue._cancelled_jobs, queue._paused = studio, {"j1": job}, set(), False
+        queue._lock = __import__("threading").RLock()
+        queue._running = True
+        saved = []
+
+        def execute(status, cb):
+            queue._running = False                    # one pass of the loop
+            raise vs.ColabRenderPending(15, reason="Colab: rendering, step 3/20")
+
+        studio.execute_job = execute
+        queue._save = lambda force=False: saved.append(force)
+        before = real_time.time()
+        queue._worker_loop()
+        self.assertEqual(job.stage, vs.Stage.QUEUED)
+        self.assertEqual(job.deferrals, 0)
+        self.assertLess(job.not_before - before, 60)      # not the 2-45 min quota back-off
+        self.assertEqual(job.message, "⏳ Colab: rendering, step 3/20")
 
 
 class QuotaBackoffTests(unittest.TestCase):
@@ -374,8 +391,8 @@ class ColabNotebookTests(unittest.TestCase):
         self.assertIn("t5_cpu=not T5_ON_GPU", load)
         self.assertIn("mmap=True", load)
 
-    def test_studio_waits_longer_than_a_capped_t4_render(self):
-        self.assertGreaterEqual(vs.ColabBackend.PREDICT_TIMEOUT, 2700)
+    def test_studio_keeps_a_render_longer_than_a_capped_t4_render(self):
+        self.assertGreaterEqual(vs.ColabBackend.MAX_PENDING_SECONDS, 2700)
 
 
 if __name__ == "__main__":
