@@ -1079,16 +1079,22 @@ class GenerationBackend:
             pass
         return None
 
+class ColabRenderPending(QuotaExhausted):
+    """A submitted Colab request can be polled again without resubmitting it."""
+
+
 class ColabBackend(GenerationBackend):
     name = "colab"
     description = "Free Google Colab T4 GPU Worker (Wan2.1)"
-    # Free T4 renders for 89-frame 30-step chunks + CPU UMT5 encoding can run past 15m.
-    PREDICT_TIMEOUT = 1800
+    # Poll in short intervals while retaining the remote request across queue deferrals.
+    PREDICT_TIMEOUT = 120
+    MAX_PENDING_SECONDS = 3600
 
     def __init__(self, config: StudioConfig):
         self.config = config
         self._client: Any = None
         self._client_url = ""
+        self._pending: tuple[Any, Any, float] | None = None
 
     def _normalized_url(self) -> str:
         return self.config.colab_url.strip().rstrip("/")
@@ -1150,23 +1156,40 @@ class ColabBackend(GenerationBackend):
 
     def generate(self, req: GenerationRequest, out_path: Path, progress: Callable[[str], None] = lambda m: None) -> Path:
         w, h = self._snap_wan13b(req.width, req.height)
-        progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {req.steps} steps...")
-        try:
+        steps = min(req.steps, 20)
+        args = (req.prompt, req.negative_prompt, w, h, req.num_frames,
+                steps, req.guidance, req.seed)
+        key = (self._normalized_url(), out_path)
+        if self._pending is not None:
+            previous_key, job, started = self._pending
+            if previous_key != key:
+                if not job.done() and time.monotonic() - started < self.MAX_PENDING_SECONDS:
+                    raise ColabRenderPending(30, reason="Colab is finishing an earlier clip")
+                self._pending = None
+        if self._pending is None:
             client = self._get_client()
-            result = self._predict(
-                client,
-                req.prompt, req.negative_prompt, w, h,
-                req.num_frames, req.steps, req.guidance, req.seed,
-                api_name="/generate",
-            )
-            v_path = self._extract_video(result)
-            if not v_path:
-                raise RuntimeError(f"Colab returned invalid video response: {result}")
+            progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {steps} steps...")
+            self._pending = (key, client.submit(*args, api_name="/generate"), time.monotonic())
+        _, job, started = self._pending
+        remaining = max(1, self.MAX_PENDING_SECONDS - (time.monotonic() - started))
+        try:
+            result = job.result(timeout=min(self.PREDICT_TIMEOUT, remaining))
+        except (TimeoutError, concurrent.futures.TimeoutError) as exc:
+            if not job.done() and time.monotonic() - started < self.MAX_PENDING_SECONDS:
+                raise ColabRenderPending(15, reason="Colab is still rendering this clip") from exc
+            self._pending = None
+            raise TimeoutError("Colab render timed out") from exc
         except Exception:
+            self._pending = None
             self.reset_client()
             raise
+        self._pending = None
+        v_path = self._extract_video(result)
+        if not v_path:
+            raise RuntimeError("Colab returned an invalid video response")
         shutil.copyfile(v_path, out_path)
         return out_path
+
 
 class LTXSpaceBackend(GenerationBackend):
     name = "ltx"
@@ -3177,6 +3200,8 @@ class VideoStudio:
                     backend_used = be.name
                     success = True
                     break
+                except ColabRenderPending:
+                    raise
                 except QuotaExhausted as q:
                     quota_hint = max(quota_hint, int(q.wait_seconds))
                     needs_token = needs_token or quota_needs_token(str(q))
