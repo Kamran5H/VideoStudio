@@ -300,6 +300,7 @@ def render_job_card(
     wait_label: str = "",
     error: Optional[str] = None,
     wait_kind: str = "",
+    last_seen: float = 0.0,
 ) -> str:
     """Status card with a progress bar.
 
@@ -339,6 +340,9 @@ def render_job_card(
                 f'aria-valuemin="0" aria-valuemax="100" aria-valuenow="{pct}"')
 
     elapsed_html = f" · ⏱️ {friendly_seconds(elapsed)}" if elapsed is not None else ""
+    if last_seen and not is_terminal and not is_complete:
+        quiet = max(0, int(time.time() - last_seen))
+        elapsed_html += f" · updated {friendly_seconds(quiet)} ago" if quiet >= 5 else " · updated just now"
     error_html = (
         "<details style='margin-top:8px;'><summary>Technical details</summary>"
         f"<pre style='white-space:pre-wrap; overflow-wrap:anywhere;'>{safe_error}</pre></details>"
@@ -461,6 +465,7 @@ def card_for_job(job: JobStatus) -> str:
         queue_wait_label(job, STUDIO.queue.all_jobs()),
         job.error,
         job.wait_kind,
+        job.last_seen,
     )
 
 
