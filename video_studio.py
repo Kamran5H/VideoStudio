@@ -990,6 +990,17 @@ def quota_wait_seconds(error_text: str) -> Optional[int]:
         need = int(m2.group(1)) - int(m2.group(2))
     return max(hint, min(need, 3600), 60) + 20
 
+def deferral_wait(hint_seconds: float, deferrals: int, cap_seconds: int = 2700) -> int:
+    """Seconds before a deferred job tries again.
+
+    Hugging Face often says "Try again in 0:00:00" or nothing at all when the
+    DAILY free quota is gone, so its hint alone made the studio retry every
+    1-5 minutes all day. Back off instead: 2, 4, 8, 16, 32 minutes, then the
+    cap, but never sooner than the provider's own hint (up to the cap)."""
+    backoff = 120 * 2 ** max(0, min(int(deferrals) - 1, 6))
+    return int(max(30, min(max(float(hint_seconds or 0), backoff), max(cap_seconds, 60))))
+
+
 def quota_needs_token(error_text: str) -> bool:
     """True when Hugging Face itself says the caller should sign in for quota.
 
@@ -1133,7 +1144,13 @@ class ColabBackend(GenerationBackend):
     description = "Free Google Colab T4 GPU Worker (Wan2.1)"
     # A T4 needs about a minute per step for a 5.5 s chunk (the worker caps it
     # at 25 steps), plus CPU text encoding; L4/A100 finish in a few minutes.
+    # This is how long the worker may show NO sign of life (no queue move, no
+    # new step). While steps keep advancing the studio keeps waiting, up to
+    # MAX_WAIT: a fixed limit used to abandon slow T4 renders that were
+    # still working, and the re-sent request then queued behind them.
     PREDICT_TIMEOUT = 2700
+    MAX_WAIT = 3 * 3600
+    POLL_SECONDS = 15.0
 
     def __init__(self, config: StudioConfig):
         self.config = config
@@ -1191,6 +1208,71 @@ class ColabBackend(GenerationBackend):
         return (True, "connected")
 
     @staticmethod
+    def _describe_status(status: Any) -> Tuple[Any, str]:
+        """(change signature, message) for a gradio_client status update."""
+        if status is None:
+            return None, ""
+        code = getattr(getattr(status, "code", None), "name", str(getattr(status, "code", "")))
+        rank = getattr(status, "rank", None)
+        units = getattr(status, "progress_data", None) or []
+        unit = units[0] if units else None
+        index = getattr(unit, "index", None) if unit else None
+        length = getattr(unit, "length", None) if unit else None
+        if code in ("IN_QUEUE", "JOINING_QUEUE"):
+            ahead = int(rank or 0)          # waiting requests ahead, not counting the one rendering
+            msg = ("Colab worker: finishing an earlier render; yours is next" if ahead <= 0 else
+                   f"Colab worker: finishing an earlier render; {ahead} more request(s) before yours")
+            return (code, ahead), msg
+        if index is not None and length:
+            return (code, index), f"Colab worker: rendering, step {int(index)}/{int(length)}"
+        if code in ("PROCESSING", "PROGRESS", "ITERATING"):
+            return (code,), "Colab worker: rendering..."
+        return (code, rank), ""
+
+    @classmethod
+    def _predict(cls, client: Any, *args: Any, timeout: Optional[float] = None,
+                 progress: Optional[Callable[[str], None]] = None, **kwargs: Any) -> Any:
+        """Submit to the Colab worker and wait while it shows signs of life.
+
+        Gives up (as a transient 'timed out' error, so the job is deferred and
+        retried) only when the worker has not moved for `timeout` seconds
+        (default PREDICT_TIMEOUT) or the total wait passes MAX_WAIT. A queued
+        request is cancelled on give-up so it does not run later for nobody."""
+        idle_limit = timeout or cls.PREDICT_TIMEOUT
+        report = progress or (lambda m: None)
+        job = client.submit(*args, **kwargs)
+        started = last_change = time.monotonic()
+        last_sig: Any = object()
+        while True:
+            try:
+                return job.result(timeout=cls.POLL_SECONDS)
+            except (TimeoutError, concurrent.futures.TimeoutError):
+                pass
+            try:
+                status = job.status()
+            except Exception:
+                status = None
+            sig, msg = cls._describe_status(status)
+            now = time.monotonic()
+            if isinstance(sig, tuple) and sig[0] in ("IN_QUEUE", "JOINING_QUEUE"):
+                # Waiting behind another render is normal (a render cannot be
+                # stopped once started); only MAX_WAIT bounds it.
+                last_change = now
+            if sig != last_sig:
+                last_sig, last_change = sig, now
+                if msg:
+                    report(msg)
+            idle, total = now - last_change, now - started
+            if idle > idle_limit or total > cls.MAX_WAIT:
+                try:
+                    job.cancel()
+                except Exception:
+                    pass
+                why = (f"no progress for {int(idle // 60)} min" if idle > idle_limit
+                       else f"still not finished after {int(total // 60)} min")
+                raise TimeoutError(f"colab: {why} (timed out)")
+
+    @staticmethod
     def _snap_wan13b(w: int, h: int) -> tuple[int, int]:
         """Wan2.1-T2V-1.3B only supports 832x480 (landscape) and 480x832
         (portrait). Any other bucket makes the model error, so snap to the
@@ -1207,7 +1289,7 @@ class ColabBackend(GenerationBackend):
                 client,
                 req.prompt, req.negative_prompt, w, h,
                 req.num_frames, req.steps, req.guidance, req.seed,
-                api_name="/generate",
+                api_name="/generate", progress=progress,
             )
             v_path = self._extract_video(result)
             if not v_path:
@@ -2059,6 +2141,10 @@ class AudioEngine:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.voice_cloner = VoiceCloner(config)
         self.voice_note = ""        # why the cloned voice was not used, if it was asked for
+        # Which voice this job's narration uses so far: "", "cloned" or
+        # "standard". One video never mixes the two (see generate_voiceover).
+        self.job_voice = ""
+        self.last_voice_cloned = False
 
     def generate_voiceover(
         self,
@@ -2080,16 +2166,34 @@ class AudioEngine:
         kept in ``self.voice_note``.
         """
         out = out_path or (self.temp_dir / f"vo_{uuid.uuid4().hex[:8]}.mp3")
-        if my_voice and text.strip():
+        self.last_voice_cloned = False
+        if my_voice and text.strip() and self.job_voice != "standard":
             try:
                 self.voice_cloner.synthesize(text, language, out)
                 if out.exists() and out.stat().st_size > 100:
+                    self.job_voice = "cloned"
+                    self.last_voice_cloned = True
                     return out, []
                 raise RuntimeError("the voice service returned no audio")
             except Exception as exc:
                 reason = str(exc)
-                if quota_wait_seconds(reason):
+                quota_wait = quota_wait_seconds(reason)
+                if quota_wait:
                     reason = "today's free GPU time is used up"
+                    out.unlink(missing_ok=True)
+                    if self.job_voice == "cloned":
+                        # Earlier scenes already speak in the cloned voice:
+                        # switching now would mix two voices in one video.
+                        # Wait for quota instead; finished scenes are kept.
+                        raise QuotaExhausted(
+                            max(quota_wait, 900),
+                            reason="Free GPU time for your voice is used up — finished scenes are kept",
+                        ) from exc
+                    # Nothing cloned yet: make the whole video with the
+                    # standard voice (the result card says so) instead of
+                    # failing a job only because the daily quota ran out.
+                    self.job_voice = "standard"
+                    strict_my_voice = False
                 self.voice_note = reason[:160]
                 if strict_my_voice:
                     out.unlink(missing_ok=True)
@@ -3064,7 +3168,9 @@ class JobQueue:
                     self._fail(pending_job, f"Gave up after {cap} quota/network waits: {quota.reason}")
                     continue
                 pending_job.stage = Stage.QUEUED
-                pending_job.not_before = time.time() + max(30, int(quota.wait_seconds))
+                pending_job.not_before = time.time() + deferral_wait(
+                    quota.wait_seconds, pending_job.deferrals,
+                    int(getattr(self.studio.config, "quota_wait_cap_min", 45)) * 60)
                 at = time.strftime("%H:%M", time.localtime(pending_job.not_before))
                 pending_job.message = f"⏳ {quota.reason} — auto-retry at {at} (checkpoints saved)"
                 pending_job.error = None
@@ -3185,6 +3291,7 @@ class VideoStudio:
 
         log.info("Starting Job [%s] Mode: %s", sett.job_id, sett.mode)
         self.audio_engine.voice_note = ""
+        self.audio_engine.job_voice = ""
 
         if sett.mode == "script_story":
             self._execute_script_mode(sett, job_dir, final_video_out, progress_cb)
@@ -3379,7 +3486,7 @@ class VideoStudio:
             elif not success and (quota_hint or transient):
                 raise QuotaExhausted(
                     min(quota_hint or 300, self.config.quota_wait_cap_min * 60),
-                    reason="Free GPU quota busy" if quota_hint else "Network unavailable",
+                    reason="Free cloud GPU time is used up for now" if quota_hint else "Network unavailable",
                 )
 
             if not success:
@@ -3588,6 +3695,8 @@ class VideoStudio:
                 checkpoint = self._read_scene_checkpoint(metadata_path)
                 if checkpoint is not None:
                     events, vo_dur = checkpoint
+                    if sett.use_my_voice and self._scene_voice(metadata_path) == "cloned":
+                        self.audio_engine.job_voice = "cloned"   # keep one voice after a resume
                     log.info("Checkpoint: Reusing rendered scene %s for job %s", scene_video.name, sett.job_id)
                     scene_clips.append(scene_video)
                     vo_files.append(vo_path)
@@ -3666,6 +3775,7 @@ class VideoStudio:
                 metadata_path,
                 events,
                 vo_dur,
+                voice="cloned" if self.audio_engine.last_voice_cloned else "standard",
             )
             scene_clips.append(scene_video)
 
@@ -3762,9 +3872,19 @@ class VideoStudio:
             return None
 
     @staticmethod
-    def _write_scene_checkpoint(path: Path, events: List[dict], voiceover_duration: float) -> None:
+    def _scene_voice(path: Path) -> str:
+        """'cloned' or 'standard' for a rendered scene ('' if unknown)."""
+        try:
+            value = json.loads(path.read_text(encoding="utf-8")).get("voice", "")
+        except (OSError, ValueError, AttributeError):
+            return ""
+        return value if value in ("cloned", "standard") else ""
+
+    @staticmethod
+    def _write_scene_checkpoint(path: Path, events: List[dict], voiceover_duration: float,
+                                voice: str = "standard") -> None:
         payload = json.dumps(
-            {"events": events, "voiceover_duration": voiceover_duration},
+            {"events": events, "voiceover_duration": voiceover_duration, "voice": voice},
             ensure_ascii=False,
         )
         temp_path = path.with_suffix(path.suffix + ".tmp")

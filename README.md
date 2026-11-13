@@ -107,7 +107,7 @@ On Windows, `run_videostudio.vbs` starts the studio silently in the background (
 2. **Runtime → Change runtime type**: with Colab Pro pick **L4** or **A100** (several times faster); on a **T4**, switch **High-RAM** on. On a T4 with standard RAM the 11 GB text encoder does not fit, and the first cell says so instead of crashing the session.
 3. **Run all**, then paste the printed `*.gradio.live` URL into **⚙️ Settings → More keys → Colab worker URL**, press **💾 Save settings**, then **🔄 Check connection**.
 
-The notebook adapts to the GPU: on L4/A100 the text encoder runs on the GPU, and A100 keeps every model loaded. A T4 renders about one step a minute, so steps are capped at 25 there and the studio waits up to 45 minutes per clip. Wan's own requirements are installed without its `numpy<2` and `flash_attn` pins, which would otherwise break Colab's NumPy or spend half an hour compiling.
+The notebook adapts to the GPU: on L4/A100 the text encoder runs on the GPU, and A100 keeps every model loaded. A T4 renders about one step a minute, so steps are capped at 25 there. The job card shows the worker's step progress; the studio keeps waiting while steps advance and gives up only after 45 minutes without progress. If the same chunk is sent again (after a restart or retry), the worker returns the clip it already made. Wan's own requirements are installed without its `numpy<2` and `flash_attn` pins, which would otherwise break Colab's NumPy or spend half an hour compiling.
 
 ## Refresh and job recovery
 

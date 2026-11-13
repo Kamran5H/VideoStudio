@@ -214,6 +214,134 @@ class GeminiTests(unittest.TestCase):
             self.assertEqual(vs.gemini_generate("k", "hi", lambda t: "VO:" in t), "Visual: a\nVO: b")
 
 
+def _status(code, index=None, rank=None, length=25):
+    units = [types.SimpleNamespace(index=index, length=length)] if index is not None else []
+    return types.SimpleNamespace(code=types.SimpleNamespace(name=code), rank=rank, progress_data=units)
+
+
+class ScriptedJob:
+    """A submitted Colab job whose status changes on every poll."""
+
+    def __init__(self, statuses, finish_after=None):
+        self.statuses, self.finish_after, self.polls, self.cancelled = statuses, finish_after, 0, False
+
+    def result(self, timeout=None):
+        if self.finish_after is not None and self.polls >= self.finish_after:
+            return "/tmp/clip.mp4"
+        raise TimeoutError()
+
+    def status(self):
+        st = self.statuses[min(self.polls, len(self.statuses) - 1)]
+        self.polls += 1
+        return st
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class ColabWaitTests(unittest.TestCase):
+    """From the user's log: a slow T4 render was abandoned at a fixed 30 min."""
+
+    def _wait(self, job, idle=15, max_wait=10_000):
+        clock = [0.0]
+
+        def tick():
+            clock[0] += 5.0           # every look at the clock is 5 s later
+            return clock[0]
+
+        client = types.SimpleNamespace(submit=lambda *a, **k: job)
+        messages = []
+        with patch.object(vs.ColabBackend, "POLL_SECONDS", 0), patch.object(vs.ColabBackend, "MAX_WAIT", max_wait), \
+                patch.object(vs.time, "monotonic", tick):
+            result = vs.ColabBackend._predict(client, "p", api_name="/generate", timeout=idle,
+                                              progress=messages.append)
+        return result, messages
+
+    def test_a_render_that_keeps_stepping_is_never_abandoned(self):
+        job = ScriptedJob([_status("PROGRESS", i) for i in range(25)], finish_after=25)
+        result, messages = self._wait(job)            # 25 polls ~ far beyond the 15 s idle limit
+        self.assertEqual(result, "/tmp/clip.mp4")
+        self.assertIn("Colab worker: rendering, step 24/25", messages)
+
+    def test_waiting_behind_an_earlier_render_is_not_a_stall(self):
+        job = ScriptedJob([_status("IN_QUEUE", rank=0)] * 10 + [_status("PROGRESS", 1)], finish_after=12)
+        result, messages = self._wait(job)
+        self.assertEqual(result, "/tmp/clip.mp4")
+        self.assertIn("finishing an earlier render", messages[0])
+
+    def test_a_frozen_worker_is_given_up_as_transient_and_cancelled(self):
+        job = ScriptedJob([_status("PROGRESS", 3)])
+        with self.assertRaises(TimeoutError) as ctx:
+            self._wait(job)
+        self.assertTrue(job.cancelled)
+        self.assertTrue(vs.is_transient_error(str(ctx.exception)))
+
+    def test_total_wait_is_still_bounded(self):
+        job = ScriptedJob([_status("PROGRESS", i) for i in range(1000)])
+        with self.assertRaisesRegex(TimeoutError, "still not finished"):
+            self._wait(job, max_wait=100)
+
+
+class QuotaBackoffTests(unittest.TestCase):
+    def test_daily_quota_is_not_retried_every_minute_all_day(self):
+        waits = [vs.deferral_wait(80, n) for n in range(1, 9)]
+        self.assertEqual(waits[:5], [120, 240, 480, 960, 1920])
+        self.assertEqual(set(waits[5:]), {2700})
+        self.assertEqual(vs.deferral_wait(600, 1), 600)          # the provider's own longer hint wins
+        self.assertEqual(vs.deferral_wait(99_999, 1, 2700), 2700)
+
+
+QUOTA_TEXT = ("You have exceeded your ZeroGPU quota (60s requested vs. 0s left). Try again in 0:00:00. "
+              "Subscribe to Hugging Face PRO to get 40 min of ZeroGPU quota a day")
+
+
+class VoiceQuotaTests(unittest.TestCase):
+    """From the user's log: a story failed because the voice-cloning quota ran out."""
+
+    def _engine(self):
+        engine = vs.AudioEngine()
+        self.std_calls = 0
+
+        def standard(text, language, out_path):
+            self.std_calls += 1
+            Path(out_path).write_bytes(b"\0" * 500)
+
+        return engine, standard
+
+    def test_quota_before_any_cloned_scene_uses_the_standard_voice_for_the_whole_video(self):
+        engine, standard = self._engine()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(engine.voice_cloner, "synthesize", side_effect=RuntimeError(QUOTA_TEXT)) as clone, \
+                patch("asyncio.run", side_effect=RuntimeError("offline")), \
+                patch.object(engine, "_gtts_fallback", side_effect=standard):
+            for i in range(2):
+                engine.generate_voiceover("Hello", out_path=Path(tmp) / f"{i}.mp3",
+                                          my_voice=True, strict_my_voice=True)
+        self.assertEqual(clone.call_count, 1)        # not retried for scene 2: one voice per video
+        self.assertEqual(self.std_calls, 2)
+        self.assertEqual(engine.voice_note, "today's free GPU time is used up")
+
+    def test_quota_after_a_cloned_scene_waits_instead_of_mixing_voices(self):
+        engine, standard = self._engine()
+        engine.job_voice = "cloned"
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(engine.voice_cloner, "synthesize", side_effect=RuntimeError(QUOTA_TEXT)), \
+                patch.object(engine, "_gtts_fallback", side_effect=standard):
+            with self.assertRaises(vs.QuotaExhausted) as ctx:
+                engine.generate_voiceover("Hello", out_path=Path(tmp) / "a.mp3", my_voice=True, strict_my_voice=True)
+        self.assertGreaterEqual(ctx.exception.wait_seconds, 900)
+        self.assertEqual(self.std_calls, 0)
+
+    def test_scene_checkpoint_remembers_the_voice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "scene_00.json"
+            vs.VideoStudio._write_scene_checkpoint(path, [], 2.0, voice="cloned")
+            self.assertEqual(vs.VideoStudio._scene_voice(path), "cloned")
+            self.assertIsNotNone(vs.VideoStudio._read_scene_checkpoint(path))
+            path.write_text('{"events": [], "voiceover_duration": 1}', encoding="utf-8")
+            self.assertEqual(vs.VideoStudio._scene_voice(path), "")
+
+
 class ColabNotebookTests(unittest.TestCase):
     def setUp(self):
         self.nb = json.loads((REPO / "colab_worker.ipynb").read_text(encoding="utf-8"))
@@ -233,9 +361,11 @@ class ColabNotebookTests(unittest.TestCase):
     def test_worker_matches_the_studio_call_and_gpu_profile(self):
         serve = self.code[-1]
         self.assertIn("def generate(prompt, negative_prompt, width, height, num_frames,\n"
-                      "             steps, guidance, seed):", serve)
+                      "             steps, guidance, seed, progress=", serve)
+        self.assertIn("[p, np_, w, h, nf, st, g, sd]", serve)     # the 8 inputs ColabBackend sends
         self.assertIn("api_name='generate'", serve)
-        for name in ("offload_model=OFFLOAD", "shift=SAMPLE_SHIFT", "MAX_STEPS"):
+        for name in ("offload_model=OFFLOAD", "shift=SAMPLE_SHIFT", "MAX_STEPS",
+                     "gr.Progress(track_tqdm=True)", "FINISHED[key] = out", "same request as before"):
             self.assertIn(name, serve)
         check = self.code[0]
         for name in ("T5_ON_GPU", "OFFLOAD", "MAX_STEPS", "SAMPLE_SHIFT", "High-RAM"):
