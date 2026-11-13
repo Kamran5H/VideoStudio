@@ -97,3 +97,11 @@ The story screen shows the topic, shape and make button. The script editor and s
 - **Save settings** empties the key boxes and marks saved keys. A Colab worker URL that does not start with http(s):// is rejected.
 - Empty **Improve my idea** and **Write the script for me** presses show a message.
 - Editor previews and exports older than seven days are removed from `outputs/editor/`.
+
+### Fixes found by rendering real videos
+- The script writer was told about Urdu in every request, so an English story could come back in Urdu. That line is now sent only for Urdu, and a reply in the wrong writing system is rejected and retried.
+- Urdu text read by the English voice produced about 0.1 s of speech, broken caption timings, and a job marked Completed. Language is now on the main form, a mismatch is reported before queueing, and the pipeline fails with a reason if narration is far too short for its text.
+- The captions and render report list under the player never appeared, because it was looked up by the browser's cached copy of the video. It now comes from the job.
+- Improve my idea waited 6 s for a service that needs 10 to 20 s, then pasted the offline style template into the box. It now waits up to 30 s and leaves the text unchanged, with a message, if no AI answers.
+- A failed video's card shows the reason in plain view.
+- Tall AI pictures were often two pictures stacked. They are now requested at 3:4 and cropped.

@@ -174,7 +174,7 @@ class VideoStudioCoreTests(unittest.TestCase):
         ):
             update = app.make_clip("A boat", "9:16", 5, "", "English", "Female", "Ambient",
                                    True, "1080p", "Cinematic")
-        self.assertIn("Making your video", update[0])
+        self.assertIn("Started", update[0])
         self.assertNotIn("%", update[0])
         self.assertIn("Generating AI clip 1/1", update[1])
         self.assertEqual(update[2], "active")
@@ -222,13 +222,91 @@ class VideoStudioCoreTests(unittest.TestCase):
             queue = app.STUDIO.queue
             with patch.dict(queue._jobs, {"lib-done": done, "lib-run": running}, clear=True), patch.object(queue, "_save"):
                 (label, job_id), = app.library_choices()
-                self.assertIn("Salty ocean · Story", label)
+                self.assertIn("· Story · Salty ocean", label)
                 self.assertEqual(app.library_show(job_id)[0], str(video))
                 self.assertFalse(queue.remove("lib-run"))          # still rendering: must be stopped first
                 self.assertTrue(queue.remove("lib-done"))
                 self.assertFalse(video.exists())
                 self.assertEqual(app.library_choices(), [])
                 self.assertIn("lib-run", queue._jobs)
+
+    def test_narration_must_be_written_in_the_chosen_language(self):
+        from video_studio import QualityError, check_narration_length, language_mismatch, spoken_lines
+        urdu = "کیا آپ نے کبھی سوچا ہے کہ سمندر نمکین کیوں ہے؟"
+        self.assertEqual(language_mismatch(urdu, "Urdu"), "")
+        self.assertIn("Urdu", language_mismatch(urdu, "English"))
+        self.assertEqual(language_mismatch("Why is the ocean salty? Rivers carry salt.", "English"), "")
+        self.assertIn("English letters", language_mismatch("Samandar namkeen kyun hai, socha kabhi?", "Urdu"))
+        self.assertEqual(language_mismatch("NASA", "Urdu"), "")           # too short to judge
+        self.assertEqual(language_mismatch(urdu + " NASA", "Urdu"), "")   # a foreign name is fine
+        script = f"Visual: ocean waves at sunrise\nVO: {urdu}"
+        self.assertEqual(spoken_lines(script), urdu)                      # English keywords are not narration
+        queue = app.STUDIO.queue
+        with patch.object(queue, "submit") as submit:
+            message = app.make_story("Ocean", script, "9:16", "English", "Female", "Calm", True, "Cinematic")[0]
+            self.assertIn("Change Language", message)
+            message = app.make_clip("A boat", "16:9", 5, urdu, "English", "Female", "Calm", True, "1080p", "Cinematic")[0]
+            self.assertIn("Change Language", message)
+            submit.assert_not_called()
+        check_narration_length("A calm sentence of six words.", 2.4, "English")
+        with self.assertRaisesRegex(QualityError, "could not read this text"):
+            check_narration_length(urdu, 0.1, "English")
+
+    def test_script_writer_rejects_a_reply_in_the_wrong_language(self):
+        from video_studio import FreeLLMPromptEnhancer, QualityError, StudioConfig
+        urdu_reply = ("Visual: ocean waves\nVO: کیا آپ نے کبھی سوچا ہے کہ سمندر نمکین کیوں ہے؟\n"
+                      "Visual: river stones\nVO: دریا پہاڑوں سے نمک بہا کر سمندر تک لاتے ہیں۔")
+        english_reply = ("Visual: ocean waves\nVO: Have you ever wondered why the sea is salty?\n"
+                         "Visual: river stones\nVO: Rivers carry salt from the mountains to the sea.")
+
+        class Reply:
+            status_code = 200
+
+            def __init__(self, text):
+                self.text = text
+
+        config = StudioConfig()
+        config.gemini_api_key = ""
+        with (patch.dict("os.environ", {"GEMINI_API_KEY": ""}), patch("video_studio.time.sleep"),
+              patch("requests.get", side_effect=[Reply(urdu_reply), Reply(english_reply)]) as get):
+            self.assertEqual(FreeLLMPromptEnhancer.generate_script("Ocean", 2, "English", config), english_reply)
+            self.assertEqual(get.call_count, 2)
+        with (patch.dict("os.environ", {"GEMINI_API_KEY": ""}), patch("video_studio.time.sleep"),
+              patch("requests.get", return_value=Reply(urdu_reply))):
+            self.assertEqual(FreeLLMPromptEnhancer.generate_script("Ocean", 2, "Urdu", config), urdu_reply)
+            with self.assertRaises(QualityError):
+                FreeLLMPromptEnhancer.generate_script("Ocean", 2, "English", config)
+
+    def test_improve_idea_keeps_the_text_when_no_ai_answers(self):
+        from video_studio import FreeLLMPromptEnhancer, StudioConfig
+        config = StudioConfig()
+        config.gemini_api_key = ""
+        with patch.dict("os.environ", {"GEMINI_API_KEY": ""}), patch("requests.get", side_effect=OSError("offline")):
+            self.assertEqual(FreeLLMPromptEnhancer.expand_with_ai("a boat", "Cinematic", config, offline_fallback=False), "")
+            self.assertIn("boat", FreeLLMPromptEnhancer.expand_with_ai("a boat", "Cinematic", config))
+        with (patch.object(FreeLLMPromptEnhancer, "expand_with_ai", return_value=""), patch.object(app.gr, "Warning") as warn):
+            self.assertEqual(app.improve_idea("a boat", "Cinematic"), "a boat")
+            warn.assert_called_once()
+
+    def test_finished_video_brings_its_caption_and_report_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            video, srt = Path(tmp) / "result.mp4", Path(tmp) / "result.srt"
+            video.write_bytes(b"video")
+            srt.write_text("1", encoding="utf-8")
+            done = JobStatus(job_id="files-done", stage=Stage.DONE, video_path=str(video), srt_path=str(srt),
+                             settings=JobSettings(job_id="files-done", mode="script_story", prompt="Story"))
+            with patch.object(app.STUDIO.queue, "all_jobs", return_value=[done]):
+                first = sync_job_outputs()
+                self.assertEqual(first[13]["value"], [str(srt)])
+                self.assertTrue(first[13]["visible"])
+                self.assertEqual(sync_job_outputs("", str(video))[13], app.gr.skip())
+
+    def test_ai_pictures_are_requested_at_a_size_the_model_handles(self):
+        from video_studio import MediaFetcher
+        self.assertEqual(MediaFetcher.image_request_size(1080, 1920), (768, 1024))   # tall: no stacked pictures
+        self.assertEqual(MediaFetcher.image_request_size(1920, 1080), (1024, 576))
+        self.assertEqual(MediaFetcher.image_request_size(1080, 1080), (1024, 1024))
+        self.assertEqual(MediaFetcher.image_request_size(832, 480), (832, 448))
 
     def test_settings_reject_a_bad_worker_url_without_saving(self):
         cfg = app.STUDIO.config

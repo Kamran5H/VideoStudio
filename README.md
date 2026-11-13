@@ -26,7 +26,7 @@
 
 **🎙️ My voice (optional):** record 10 to 20 seconds of yourself, press **Save my voice**, and the Voice choice under *More options* switches to **My voice**. It is a close likeness, not a perfect copy. It works in English, Hindi, Arabic, Spanish, French, German, Chinese and Japanese (the free cloning model has no Urdu or Punjabi yet), and it needs the same free Hugging Face token as AI video. If My voice cannot be used for a video, you are told why when you press **Make my video**, before anything is queued.
 
-Voice language, music, subtitles, quality and visual style are under **More options**. **⚙️ Settings** shows one key up front, the free Hugging Face token; the other keys are under *More keys (optional)*. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
+**Language** is on the main form: the script is written and spoken in it. If your script or narration is written in a different language's script (for example Urdu text with Language set to English), you are told before the video starts, because the narrator could not read it. Voice, music, subtitles, quality and visual style are under **More options**. **⚙️ Settings** shows one key up front, the free Hugging Face token; the other keys are under *More keys (optional)*. To stop the studio, use **⏻ Turn off VideoStudio** in Settings.
 
 > **The studio uses local processing and hosted services; provider availability and account limits apply. Real AI video needs:** a Hugging Face account token. Hugging Face refuses GPU jobs from visitors who are not signed in, so without a token **AI clip** makes its video from AI pictures with camera motion instead (and tells you so). Create a free account at huggingface.co, open *Settings → Access Tokens*, make a **Read** token and paste it into **⚙️ Settings**. A free account gets a few minutes of GPU time per day, which is a handful of 5-second clips.
 
@@ -64,6 +64,8 @@ Narration and subtitles are timed to each scene's on-screen slot, so they stay i
 - Stock selection prefers fresh shots and suitable framing. Downloads are cached by source and rendition to avoid fetching the same file again.
 - Still images use gentle pans and zooms spread over the scene duration. Crossfade failures retain the scene timeline so later narration stays aligned.
 - H.264 exports use CRF 18 and fast-start MP4 packaging. Upscaling uses Lanczos without aggressive sharpening; it does not create native detail.
+- A narration that comes back far too short for its text stops the job with a clear reason instead of finishing as a near-silent video.
+- AI pictures for tall videos are requested in a 3:4 frame and cropped, because narrower requests often return two pictures stacked. The free picture service may add its own small logo.
 - A missing visual never becomes a text placeholder. If both speech services fail, narration does not become silence. The job stops with a useful error and can be retried after the cause is resolved.
 - Script generation requires complete, distinct scene pairs in the requested count. When services are unavailable, paste your own script; the studio does not replace it with generic narration or an English template for another language.
 - AI scripts are drafts, and generated imagery is illustrative. Review narration and verify factual claims before publishing. Stock search results also need editorial review for relevance.
