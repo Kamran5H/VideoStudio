@@ -47,9 +47,9 @@ DEVELOPER_ATTRIBUTION = "Developer: Kamran Ashraf"
 # ---------------------------------------------------------------------------
 
 SHAPES = [
-    ("▭  Wide — YouTube", "16:9"),
-    ("▯  Tall — Reels / Shorts / TikTok", "9:16"),
-    ("□  Square — Instagram", "1:1"),
+    ("Wide · YouTube", "16:9"),
+    ("Tall · Reels, Shorts, TikTok", "9:16"),
+    ("Square · Instagram", "1:1"),
 ]
 SHAPE_VALUES = [v for _, v in SHAPES]
 QUALITIES = ["720p", "1080p", "4K"]
@@ -76,52 +76,105 @@ TERMINAL = (Stage.DONE, Stage.FAILED, Stage.CANCELLED)
 # ---------------------------------------------------------------------------
 
 THEME = Soft(
-    primary_hue="indigo",
-    secondary_hue="sky",
+    primary_hue="violet",
+    secondary_hue="indigo",
+    neutral_hue="slate",
     radius_size="lg",
     font=[GoogleFont("Inter"), "Segoe UI", "system-ui", "sans-serif"],
+).set(
+    body_background_fill="linear-gradient(180deg, #f5f3ff 0%, #f8fafc 320px)",
+    body_background_fill_dark="linear-gradient(180deg, #1e1b4b 0%, #0f172a 320px)",
+    block_label_background_fill="transparent",
+    block_label_background_fill_dark="transparent",
+    block_title_background_fill="transparent",
+    block_title_background_fill_dark="transparent",
+    block_title_text_color="*neutral_700",
+    block_title_text_color_dark="*neutral_200",
+    block_label_text_color="*neutral_600",
+    block_label_text_color_dark="*neutral_300",
+    block_title_text_weight="600",
+    block_title_padding="0",
+    block_shadow="0 1px 2px rgba(15, 23, 42, 0.05)",
+    button_primary_background_fill="linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)",
+    button_primary_background_fill_hover="linear-gradient(135deg, #6d28d9 0%, #4338ca 100%)",
+    button_primary_background_fill_dark="linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)",
+    button_primary_background_fill_hover_dark="linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%)",
+    button_primary_text_color="white",
+    button_large_radius="14px",
 )
 
 CSS = """
-.gradio-container { max-width: 1180px !important; margin: 0 auto !important; }
-#vs-hero { text-align: left; padding: 28px 8px 20px; }
-.vs-brand-dot { color: #6366f1; }
-.vs-welcome-card { padding: 24px !important; border: 1px solid var(--border-color-primary); border-radius: 20px; background: var(--block-background-fill); }
-.vs-panel { padding: 18px !important; }
-#vs-navigation { margin-bottom: 18px; }
-#vs-workspaces .tab-wrapper { display: none; }
-#vs-hero h1 { font-size: 2rem; margin: 0; letter-spacing: -0.02em; }
-#vs-hero p { margin: 6px 0 0; opacity: 0.75; font-size: 1.02rem; }
-.vs-steps { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
-.vs-step { padding: 6px 12px; border-radius: 999px; font-size: 0.86rem;
-           background: var(--color-accent-soft); color: var(--body-text-color); }
-.vs-make { font-size: 1.1rem !important; min-height: 52px; }
+.gradio-container { max-width: 1120px !important; width: 100% !important; margin: 0 auto !important; }
+footer { display: none !important; }
+
+/* Header */
+#vs-hero { display: flex; align-items: center; gap: 14px; padding: 22px 4px 10px; }
+.vs-logo { width: 46px; height: 46px; border-radius: 14px; flex: none; display: grid; place-items: center;
+           background: linear-gradient(135deg, #7c3aed, #4f46e5); color: #fff; font-size: 1.15rem;
+           box-shadow: 0 8px 20px rgba(99, 102, 241, 0.35); padding-left: 3px; }
+#vs-hero h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.02em; line-height: 1.15; }
+#vs-hero p { margin: 2px 0 0; opacity: 0.7; font-size: 0.98rem; }
+
+/* Navigation: the tab bar as pills */
+#vs-workspaces .tab-wrapper { height: auto !important; padding: 0 0 14px !important; }
+#vs-workspaces .tab-container { height: auto !important; overflow: visible !important; gap: 6px;
+    padding: 4px 0 !important; flex-wrap: wrap; }
+#vs-workspaces .tab-container::after { display: none !important; }
+#vs-workspaces button[role="tab"] { height: auto !important; overflow: visible !important;
+    border: 1px solid transparent !important; border-radius: 999px !important;
+    padding: 9px 16px !important; font-weight: 600; font-size: 0.95rem; line-height: 1.2;
+    color: var(--body-text-color) !important; opacity: 0.72; background: transparent;
+    transition: background 0.15s, opacity 0.15s; }
+#vs-workspaces button[role="tab"]::after { display: none !important; }
+#vs-workspaces button[role="tab"]:hover { background: var(--color-accent-soft); opacity: 1; }
+#vs-workspaces button[role="tab"][aria-selected="true"] { background: var(--button-primary-background-fill) !important;
+    color: #fff !important; opacity: 1; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); }
+
+/* Start page */
+.vs-welcome-card { padding: 22px !important; border: 1px solid var(--border-color-primary); border-radius: 20px;
+    background: var(--block-background-fill); transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s; }
+.vs-welcome-card:hover { transform: translateY(-3px); border-color: var(--color-accent);
+    box-shadow: 0 12px 28px rgba(99, 102, 241, 0.16); }
+.vs-card-icon { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+    font-size: 1.35rem; background: var(--color-accent-soft); margin-bottom: 4px; }
+.vs-card-title { font-size: 1.08rem; font-weight: 700; margin: 12px 0 6px; }
+.vs-card-text { margin: 0; opacity: 0.8; line-height: 1.5; min-height: 3em; }
+.vs-panel { padding: 18px !important; border: 1px solid var(--border-color-primary); border-radius: 18px;
+    background: var(--block-background-fill); }
+.vs-make { font-size: 1.08rem !important; min-height: 52px; }
+
+/* Job cards */
 .q-card { border: 1px solid var(--border-color-primary); border-radius: 14px; padding: 14px 16px;
-          background: var(--block-background-fill); }
+          background: var(--block-background-fill); margin-bottom: 8px; }
 .q-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
 .q-prompt { opacity: 0.8; font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .q-stage { font-weight: 700; white-space: nowrap; }
 .q-progress-meta { display: flex; justify-content: space-between; font-size: 0.8rem; opacity: 0.7; margin-top: 8px; }
 .q-progress-track { height: 8px; border-radius: 999px; background: var(--border-color-primary);
                     overflow: hidden; margin-top: 6px; position: relative; }
-.q-progress-fill { height: 100%; width: 0; background: var(--color-accent); border-radius: 999px; }
+.q-progress-fill { height: 100%; width: 0; background: linear-gradient(90deg, #7c3aed, #4f46e5); border-radius: 999px; }
 .q-progress-track.is-indeterminate .q-progress-fill { width: 35%; position: absolute;
     animation: vs-slide 1.4s ease-in-out infinite; }
+.q-progress-track.is-done .q-progress-fill { width: 100%; background: #10b981; }
 .q-progress-track.is-terminal .q-progress-fill { width: 100%; background: #ef4444; }
 @keyframes vs-slide { 0% { left: -35%; } 100% { left: 100%; } }
 @media (prefers-reduced-motion: reduce) {
   .q-progress-track.is-indeterminate .q-progress-fill { animation: none; width: 100%; opacity: 0.5; }
+  .vs-welcome-card { transition: none; }
+  .vs-welcome-card:hover { transform: none; }
 }
 .vs-hint { font-size: 0.86rem; opacity: 0.7; }
-#vs-footer { text-align: center; font-size: 0.85rem; opacity: 0.65; padding: 10px 0 4px; }
-@media (max-width: 640px) { #vs-hero h1 { font-size: 1.5rem; } }
+#vs-footer { text-align: center; font-size: 0.85rem; opacity: 0.65; padding: 18px 0 10px; }
+@media (max-width: 640px) { #vs-hero h1 { font-size: 1.3rem; } }
 """
 
 HERO_HTML = """
 <div id="vs-hero">
-  <h1>VideoStudio<span class="vs-brand-dot">.</span></h1>
-  <p>Your idea. Your voice. Your next video.</p>
-
+  <div class="vs-logo" aria-hidden="true">▶</div>
+  <div>
+    <h1>VideoStudio</h1>
+    <p>Your idea. Your voice. Your next video.</p>
+  </div>
 </div>
 """
 
@@ -193,6 +246,8 @@ def queue_wait_label(job: JobStatus, jobs: List[JobStatus], now: Optional[float]
 def readable_job_message(job: JobStatus) -> str:
     if job.stage == Stage.FAILED:
         return "This video could not be finished. Open the details below to see why."
+    if job.stage == Stage.CANCELLED:
+        return "You stopped this video. Press Try again to continue it."
     if job.stage == Stage.QUEUED and job.error:
         return "A temporary problem happened. It will retry by itself."
     return job.message
@@ -218,7 +273,7 @@ def render_job_card(
 
     if is_complete:
         progress_label, progress_value = "Done", "100%"
-        progress_class, aria = "q-progress-track", (
+        progress_class, aria = "q-progress-track is-done", (
             'role="progressbar" aria-label="Completed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100"')
     elif is_queued:
         progress_label, progress_value = (html.escape(wait_label) or "Waiting for the worker"), "—"
@@ -238,7 +293,6 @@ def render_job_card(
         f"<pre style='white-space:pre-wrap; overflow-wrap:anywhere;'>{safe_error}</pre></details>"
         if error and safe_error else ""
     )
-    fill_style = ' style="width:100%;"' if is_complete else ""
     return f"""
     <div class="q-card">
       <div class="q-head">
@@ -246,7 +300,7 @@ def render_job_card(
         <span class="q-stage" style="color:{color};">{icon} {html.escape(stage.value)}</span>
       </div>
       <div class="q-progress-meta"><span>{progress_label}</span><span>{progress_value}</span></div>
-      <div class="{progress_class}" {aria}><div class="q-progress-fill"{fill_style}></div></div>
+      <div class="{progress_class}" {aria}><div class="q-progress-fill"></div></div>
       <div style="margin-top:9px; font-size:0.92rem;">
         {html.escape(redact_sensitive_text(message))}<span class="vs-hint">{elapsed_html}</span>
         <span class="vs-hint" style="float:right;">#{html.escape(str(job_id))}</span>
@@ -274,42 +328,64 @@ def card_for_job(job: JobStatus) -> str:
     )
 
 
+def jobs_for(mode: str) -> List[JobStatus]:
+    return [j for j in STUDIO.queue.all_jobs() if j.settings and j.settings.mode == mode]
+
+
 def active_job(mode: str) -> Optional[JobStatus]:
     """Unfinished job of this mode (running first, then queued)."""
-    jobs = [j for j in STUDIO.queue.all_jobs() if j.settings and j.settings.mode == mode]
+    jobs = jobs_for(mode)
     running = [j for j in jobs if j.stage not in TERMINAL and j.stage != Stage.QUEUED]
     queued = [j for j in jobs if j.stage == Stage.QUEUED]
     return (running or queued or [None])[0]
 
 
-def latest_completed_job(mode: Optional[str] = None) -> Optional[JobStatus]:
-    completed = [
+def newest_job(mode: str) -> Optional[JobStatus]:
+    return max(jobs_for(mode), key=lambda job: job.settings.created_at if job.settings else 0, default=None)
+
+
+def completed_jobs(mode: Optional[str] = None) -> List[JobStatus]:
+    """Finished videos whose file still exists, newest first."""
+    done = [
         job for job in STUDIO.queue.all_jobs()
         if job.stage == Stage.DONE
         and (mode is None or (job.settings and job.settings.mode == mode))
         and job.video_path
         and Path(job.video_path).is_file()
     ]
-    return max(completed, key=lambda job: job.settings.created_at if job.settings else 0, default=None)
+    return sorted(done, key=lambda job: job.settings.created_at if job.settings else 0, reverse=True)
+
+
+def latest_completed_job(mode: Optional[str] = None) -> Optional[JobStatus]:
+    return next(iter(completed_jobs(mode)), None)
+
+
+IDLE_TEXT = "Your video will appear here. It keeps rendering even if you refresh this page."
 
 
 def tab_state(mode: str) -> tuple:
-    """(card_html, latest_video_path_or_None, active_job_id) for one tab."""
+    """(card_html, latest_video_path_or_None, job_id, can_stop, can_retry) for one screen.
+
+    The card follows the running job; when nothing is running it shows the
+    newest job, so a failure stays readable (with Try again) instead of being
+    replaced by an older success. `job_id` is the job Stop / Try again act on.
+    """
     job = active_job(mode)
+    newest = newest_job(mode)
     result = latest_completed_job(mode)
+    video = result.video_path if result else None
     if job is not None:
-        card = card_for_job(job)
-    elif result is not None:
-        card = card_for_job(result)
-    else:
-        card = idle_card("Your video will appear here. It keeps rendering even if you refresh this page.")
-    return card, (result.video_path if result else None), (job.job_id if job else "")
+        return card_for_job(job), video, job.job_id, True, False
+    if newest is not None and newest.stage in (Stage.FAILED, Stage.CANCELLED):
+        return card_for_job(newest), video, newest.job_id, False, True
+    shown = newest if newest is not None and newest.stage == Stage.DONE else result
+    return (card_for_job(shown) if shown else idle_card(IDLE_TEXT)), video, "", False, False
 
 
 def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> tuple:
-    """Timer/refresh hook: update both tabs; reload a video only when it changed."""
-    clip_card, clip_video, clip_id = tab_state("ai_video")
-    story_card, story_video, story_id = tab_state("script_story")
+    """Timer/refresh hook: update both screens; reload a video only when it changed."""
+    clip_card, clip_video, clip_id, clip_stop, clip_retry = tab_state("ai_video")
+    story_card, story_video, story_id, story_stop, story_retry = tab_state("script_story")
     clip_path, story_path = str(clip_video or ""), str(story_video or "")
     return (
         clip_card,
@@ -320,6 +396,10 @@ def sync_job_outputs(last_clip_video: str = "", last_story_video: str = "") -> t
         story_id,
         clip_path or last_clip_video,
         story_path or last_story_video,
+        gr.update(visible=clip_stop),
+        gr.update(visible=clip_retry),
+        gr.update(visible=story_stop),
+        gr.update(visible=story_retry),
     )
 
 
@@ -339,6 +419,8 @@ def files_for_video(video_path: Optional[str]) -> List[str]:
 # Building jobs from (untrusted) form input
 # ---------------------------------------------------------------------------
 
+DELIVERIES = ["Natural", "Engaging", "Calm", "Energetic"]
+
 
 def _standard_voice(voice: Any) -> str:
     """The standard voice to use (also the backup when 'My voice' is chosen)."""
@@ -356,7 +438,7 @@ def build_ai_settings(prompt, shape, seconds, narration, language, voice, music,
         language=_choice(language, LANGUAGES, "English"),
         voice_gender=_standard_voice(voice),
         use_my_voice=(voice == MY_VOICE),
-        narration_delivery=_choice(delivery, ["Natural", "Engaging", "Calm", "Energetic"], "Engaging"),
+        narration_delivery=_choice(delivery, DELIVERIES, "Engaging"),
         music_mood=_choice(music, MUSIC, "Ambient"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -375,7 +457,7 @@ def build_story_settings(topic, script, shape, language, voice, music, subtitles
         language=_choice(language, LANGUAGES, "English"),
         voice_gender=_standard_voice(voice),
         use_my_voice=(voice == MY_VOICE),
-        narration_delivery=_choice(delivery, ["Natural", "Engaging", "Calm", "Energetic"], "Engaging"),
+        narration_delivery=_choice(delivery, DELIVERIES, "Engaging"),
         music_mood=_choice(music, MUSIC, "Calm"),
         subtitles_enabled=bool(subtitles),
         subtitle_style=SUBTITLE_STYLE,
@@ -388,57 +470,53 @@ def build_story_settings(topic, script, shape, language, voice, music, subtitles
 # ---------------------------------------------------------------------------
 
 VIEW_ONLY = "⚠️ Another VideoStudio window is already running and owns the queue. Use that one."
+STARTED = "⏳ Making your video… you can leave this page open or refresh it."
 
 
-def _follow_job(job_id: str, done_text: str):
-    """Yield (status_text, card_html, video_or_None, job_id) until the job ends."""
-    while True:
-        status = STUDIO.queue.get_status(job_id)
-        if status is None:
-            time.sleep(1.0)
-            continue
-        card = card_for_job(status)
-        if status.stage == Stage.DONE:
-            video = status.video_path if status.video_path and Path(status.video_path).exists() else None
-            yield done_text, card, video, job_id
-            return
-        if status.stage == Stage.CANCELLED:
-            yield "⏹️ Stopped.", card, None, job_id
-            return
-        if status.stage == Stage.FAILED:
-            yield "❌ Sorry, this video failed. See the details in the card.", card, None, job_id
-            return
-        yield "⏳ Making your video… you can leave this page open or refresh it.", card, gr.skip(), job_id
-        time.sleep(1.0)
+def my_voice_problem(sett: JobSettings) -> str:
+    """Why 'My voice' cannot narrate this job ('' when it can, or is not needed).
+    Checked before queueing so the job does not fail minutes later."""
+    needs_voice = sett.mode == "script_story" or bool(sett.voice_script)
+    if not (sett.use_my_voice and needs_voice):
+        return ""
+    reason = STUDIO.audio_engine.voice_cloner.unavailable_reason(sett.language)
+    return f"🎙️ My voice cannot be used: {reason}. Fix that, or choose Female or Male under More options." if reason else ""
+
+
+def _submit(sett: JobSettings) -> tuple:
+    """Queue a job; returns (status_text, card_html, job_id). The page timer
+    follows the job from here, so a refresh never loses it."""
+    problem = my_voice_problem(sett)
+    if problem:
+        return problem, gr.skip(), gr.skip()
+    job_id = STUDIO.queue.submit(sett)
+    status = STUDIO.queue.get_status(job_id)
+    others = [j for j in STUDIO.queue.all_jobs() if j.stage not in TERMINAL and j.job_id != job_id]
+    text = STARTED if not others else f"⏳ Added to the queue — {len(others)} video(s) ahead of this one."
+    return text, (card_for_job(status) if status else gr.skip()), job_id
 
 
 def make_clip(prompt, shape, seconds, narration, language, voice, music, subtitles, quality, style, delivery="Engaging"):
     if not STUDIO.queue.is_worker:
-        yield VIEW_ONLY, idle_card("This window is view-only."), None, ""
-        return
+        return VIEW_ONLY, idle_card("This window is view-only."), ""
     sett = build_ai_settings(prompt, shape, seconds, narration, language, voice, music, subtitles, quality, style, delivery)
     if not sett.prompt:
-        yield "✏️ First, describe what the video should show.", idle_card("Waiting for your idea."), None, ""
-        return
-    job_id = STUDIO.queue.submit(sett)
-    yield from _follow_job(job_id, "🎉 Your video is ready! Use the ⬇ button on the player to download it.")
+        return "✏️ First, describe what the video should show.", gr.skip(), gr.skip()
+    return _submit(sett)
 
 
 def make_story(topic, script, shape, language, voice, music, subtitles, style, scenes=4, delivery="Engaging"):
     if not STUDIO.queue.is_worker:
-        yield VIEW_ONLY, idle_card("This window is view-only."), None, ""
-        return
+        return VIEW_ONLY, idle_card("This window is view-only."), ""
     if not _text(topic, 1) and not _text(script, 1):
-        yield "✏️ Type a topic (or paste a script) first.", idle_card("Waiting for your topic."), None, ""
-        return
-    sett = build_story_settings(topic, script, shape, language, voice, music, subtitles, style, scenes, delivery)
-    job_id = STUDIO.queue.submit(sett)
-    yield from _follow_job(job_id, "🎉 Your story video is ready! Use the ⬇ button on the player to download it.")
+        return "✏️ Type a topic (or paste a script) first.", gr.skip(), gr.skip()
+    return _submit(build_story_settings(topic, script, shape, language, voice, music, subtitles, style, scenes, delivery))
 
 
 def improve_idea(prompt: str, style: str) -> str:
     text = _text(prompt, TEXT_LIMITS["prompt"])
     if not text:
+        gr.Warning("Type your idea first, then I can improve it.")
         return prompt
     return FreeLLMPromptEnhancer.expand_with_ai(text, _choice(style, STYLES, "Cinematic"), STUDIO.config)
 
@@ -446,7 +524,7 @@ def improve_idea(prompt: str, style: str) -> str:
 def write_script(topic: str, scenes, language: str) -> str:
     text = _text(topic, TEXT_LIMITS["topic"])
     if not text:
-        return ""
+        raise gr.Error("Type what your video is about first.")
     count = int(_number(scenes, 3, *STORY_SCENES))
     try:
         return FreeLLMPromptEnhancer.generate_script(
@@ -461,7 +539,70 @@ def stop_job(job_id: str) -> str:
         return VIEW_ONLY
     if not job_id:
         return "Nothing is running right now."
-    return "⏹️ Stopping…" if STUDIO.queue.cancel(job_id) else "That video already finished."
+    return "⏹️ Stopped." if STUDIO.queue.cancel(job_id) else "That video already finished."
+
+
+def retry_job(job_id: str) -> str:
+    """Re-queue a failed or stopped job; it resumes from its last checkpoint."""
+    if not STUDIO.queue.is_worker:
+        return VIEW_ONLY
+    status = STUDIO.queue.get_status(job_id) if job_id else None
+    if status is None or status.stage not in (Stage.FAILED, Stage.CANCELLED) or not status.settings:
+        return "There is nothing to try again."
+    return "🔁 Trying again — finished parts are kept." if STUDIO.queue.retry(job_id) else "Could not restart that video."
+
+
+# ---------------------------------------------------------------------------
+# My videos (library of finished renders)
+# ---------------------------------------------------------------------------
+
+
+def library_choices() -> List[tuple]:
+    """(label, job_id) for every finished video, newest first."""
+    choices = []
+    for job in completed_jobs():
+        sett = job.settings
+        when = time.strftime("%d %b, %H:%M", time.localtime(sett.created_at)) if sett else ""
+        kind = "Story" if sett and sett.mode == "script_story" else "AI clip"
+        title = (sett.prompt if sett else "Video").strip().replace("\n", " ")[:50] or "Video"
+        choices.append((f"{title} · {kind} · {when}", job.job_id))
+    return choices
+
+
+def _library_job(job_id: Any) -> Optional[JobStatus]:
+    return next((job for job in completed_jobs() if job.job_id == job_id), None)
+
+
+def library_show(job_id: Any) -> tuple:
+    """(video, companion_files update) for the picked video."""
+    job = _library_job(job_id)
+    if job is None or not job.video_path:
+        return None, gr.update(value=[], visible=False)
+    files = files_for_video(job.video_path)
+    return job.video_path, gr.update(value=files, visible=bool(files))
+
+
+def library_refresh(selected: Any = None) -> tuple:
+    """(dropdown, video, files, note). Keeps the current pick when it still exists."""
+    choices = library_choices()
+    ids = [job_id for _, job_id in choices]
+    pick = selected if selected in ids else (ids[0] if ids else None)
+    video, files = library_show(pick)
+    note = (f"{len(ids)} finished video(s). They are saved in `{DEFAULT_OUTPUT_DIR / 'videos'}`."
+            if ids else "No finished videos yet. Make a story or an AI clip and it will show up here.")
+    return gr.update(choices=choices, value=pick), video, files, note
+
+
+def library_delete(job_id: Any) -> tuple:
+    if not STUDIO.queue.is_worker:
+        gr.Warning("This window is view-only; delete from the main VideoStudio window.")
+    elif _library_job(job_id) is None:
+        gr.Warning("Pick a video first.")
+    elif STUDIO.queue.remove(job_id):
+        gr.Info("Video deleted.")
+    else:
+        gr.Warning("That video could not be deleted.")
+    return library_refresh()
 
 
 # ---------------------------------------------------------------------------
@@ -492,8 +633,14 @@ def save_my_voice(recording: Optional[str]) -> str:
 
 
 def delete_my_voice() -> str:
+    if not STUDIO.audio_engine.voice_cloner.has_sample():
+        return "⚪ There is no saved voice to delete."
     STUDIO.audio_engine.voice_cloner.delete_sample()
     return "🗑️ Your voice sample was deleted from this computer."
+
+
+def default_voice() -> str:
+    return MY_VOICE if STUDIO.audio_engine.voice_cloner.has_sample() else "Female"
 
 
 def test_my_voice(language: str):
@@ -523,7 +670,7 @@ def turn_off() -> str:
     return "👋 VideoStudio is turned off. Close this tab; use the desktop shortcut to start it again."
 
 
-def open_videos_folder() -> None:
+def open_videos_folder() -> str:
     v_dir = DEFAULT_OUTPUT_DIR / "videos"
     v_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -535,6 +682,8 @@ def open_videos_folder() -> None:
             subprocess.Popen(["xdg-open", str(v_dir)])
     except OSError as exc:      # headless box / no file manager: don't crash the UI event
         log.warning("Could not open %s: %s", v_dir, exc)
+        return f"Could not open the folder automatically. Your videos are in `{v_dir}`."
+    return f"📂 Opened `{v_dir}`."
 
 
 # ---------------------------------------------------------------------------
@@ -559,13 +708,27 @@ def secret_placeholder(current: str) -> str:
 
 def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: str, gemini_k: str) -> str:
     cfg = STUDIO.config
-    cfg.colab_url = (colab_url or "").strip()
+    url = (colab_url or "").strip()
+    if url and not url.lower().startswith(("http://", "https://")):
+        return "❌ The Colab worker URL must start with https:// — nothing was saved."
+    cfg.colab_url = url
     cfg.hf_token = merge_secret(cfg.hf_token, hf_tok)
     cfg.pexels_api_key = merge_secret(cfg.pexels_api_key, pexels_k)
     cfg.pixabay_api_key = merge_secret(cfg.pixabay_api_key, pixabay_k)
     cfg.gemini_api_key = merge_secret(cfg.gemini_api_key, gemini_k)
     cfg.save()
     return "✅ Saved. Keys stay on this computer (studio_config.json)."
+
+
+def save_settings(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: str, gemini_k: str) -> tuple:
+    """Save, then empty the key boxes and show which keys are now stored."""
+    message = save_api_credentials(colab_url, hf_tok, pexels_k, pixabay_k, gemini_k)
+    cfg = STUDIO.config
+    if message.startswith("❌"):
+        return (message, *(gr.skip() for _ in range(4)), backend_status_html())
+    boxes = [gr.update(value="", placeholder=secret_placeholder(key))
+             for key in (cfg.hf_token, cfg.pexels_api_key, cfg.pixabay_api_key, cfg.gemini_api_key)]
+    return (message, *boxes, backend_status_html())
 
 
 def backend_status_html() -> str:
@@ -595,17 +758,8 @@ def backend_status_html() -> str:
         rows.append(f"{'🟢' if ok else '⚪'} <b>{label}</b> — {state}")
     note = "" if has_token or STUDIO.config.colab_url.strip() else (
         "<div class='vs-hint' style='margin-top:8px;'>Without a Hugging Face token the free GPUs refuse "
-        "video jobs, so Quick clip uses pictures with camera motion instead. The token is free: create an "
-        "account at huggingface.co, open Settings → Access Tokens, make a <b>Read</b> token and paste it "
-        "on the left.</div>")
+        "video jobs, so AI clip uses pictures with camera motion instead.</div>")
     return "<div class='q-card'>" + "<br>".join(rows) + note + "</div>"
-
-
-def render_queue_table() -> str:
-    jobs = STUDIO.queue.all_jobs()
-    if not jobs:
-        return idle_card("No videos yet.")
-    return "".join(card_for_job(js) for js in reversed(jobs[-6:]))
 
 
 def read_system_logs() -> str:
@@ -627,72 +781,108 @@ def read_system_logs() -> str:
 
 def _more_options(default_music: str, with_quality: bool):
     """Shared 'More options' controls; returns them in a fixed order."""
-    with gr.Accordion("More options (optional)", open=False):
+    with gr.Accordion("More options (voice, music, look)", open=False):
         with gr.Row():
             language = gr.Dropdown(LANGUAGES, value="English", label="Voice language")
-            voice = gr.Radio(VOICES, value=MY_VOICE if STUDIO.audio_engine.voice_cloner.has_sample() else "Female", label="Voice")
+            voice = gr.Radio(VOICES, value=default_voice(), label="Voice")
             music = gr.Dropdown(MUSIC, value=default_music, label="Background music")
         with gr.Row():
             style = gr.Dropdown(STYLES, value="Cinematic", label="Look / style")
             quality = gr.Dropdown(QUALITIES, value="1080p", label="Quality", visible=with_quality,
-                                  info="Export size. Higher sizes are upscaled from the source, with larger files and slower renders.")
-            subtitles = gr.Checkbox(value=True, label="Show subtitles on the video")
-        delivery = gr.Dropdown(["Natural", "Engaging", "Calm", "Energetic"], value="Engaging", label="Narrator delivery", info="Controls standard voice pacing. Cloned voices retain the model’s delivery.")
+                                  info="Higher sizes are upscaled: larger files, slower renders.")
+            delivery = gr.Dropdown(DELIVERIES, value="Engaging", label="Narrator delivery")
+        subtitles = gr.Checkbox(value=True, label="Show subtitles on the video")
     return language, voice, music, style, quality, subtitles, delivery
+
+
+def _result_panel(height: int):
+    """Status card, Stop / Try again, player and downloads; shared by both makers."""
+    card = gr.HTML(idle_card(IDLE_TEXT))
+    with gr.Row():
+        stop = gr.Button("⏹ Stop this video", variant="stop", size="sm", visible=False)
+        retry = gr.Button("🔁 Try again", variant="primary", size="sm", visible=False)
+    video = gr.Video(label="Your video", interactive=False, height=height)
+    files = gr.File(label="Captions and render report", file_count="multiple", interactive=False, visible=False)
+    return card, stop, retry, video, files
+
+
+def _show_files(video_path: Optional[str]):
+    files = files_for_video(video_path)
+    return gr.update(value=files, visible=bool(files))
 
 
 def editor_render(path, start, end, shape, muted, caption, srt, position, size, narration=None, preview=True):
     from local_editor import render_edit
     if not path:
-        return None, "Import a video to begin."
+        return None, "Add a video to begin."
     try:
-        return render_edit(path, start, end, shape, muted, caption or "", srt, position, size, preview, narration)
+        # A cleared number box arrives as None; treat it as "not set".
+        return render_edit(path, _number(start, 0, 0, 1e6), _number(end, 0, 0, 1e6), shape, bool(muted),
+                           caption or "", srt, position, _number(size, 1, .7, 1.5), preview, narration)
     except (ValueError, RuntimeError, OSError) as exc:
         raise gr.Error(str(exc)) from exc
+
+
+def editor_export(*args):
+    video, status = editor_render(*args, preview=False)
+    return gr.update(value=video, visible=bool(video)), status
 
 
 def editor_join(paths, order):
     from local_editor import join_clips
+    paths = list(paths or [])
+    if not paths:
+        raise gr.Error("Add the clips you want to join first.")
     try:
-        paths = list(paths or [])
         if str(order or "").strip():
-            indices = [int(value.strip()) - 1 for value in order.split(",")]
+            try:
+                indices = [int(value.strip()) - 1 for value in str(order).split(",")]
+            except ValueError:
+                indices = []
             if sorted(indices) != list(range(len(paths))):
-                raise ValueError("Order must list every clip number once, for example 2,1,3.")
+                raise ValueError(f"The order must list every clip number once, for example "
+                                 f"{','.join(str(n) for n in range(len(paths), 0, -1))}.")
             paths = [paths[i] for i in indices]
         result = join_clips(paths)
-        return result, "Imported in this order: " + " → ".join(Path(p).name for p in paths)
+        return result, "✅ Joined in this order: " + " → ".join(Path(p).name for p in paths)
     except (ValueError, RuntimeError, OSError) as exc:
         raise gr.Error(str(exc)) from exc
 
 
+VIDEO_TYPES = [".mp4", ".mov", ".webm", ".mkv"]
+
+
 def build_flow_workspace():
-    with gr.Tab("Edit a video", id="flow_editor"):
+    with gr.Tab("✂️ Edit a video", id="flow_editor"):
         gr.Markdown("## Make your video yours\nAdd a clip, make a few changes, then download. Your original stays safe.")
         with gr.Accordion("Need a video? Use your Google plan", open=False) as google_help:
-            gr.Markdown("**1.** Open Flow and create a clip. **2.** Download it. **3.** Add it below. Your Google plan's limits apply; no API key is needed here.")
+            gr.Markdown("**1.** Open Flow and create a clip. **2.** Download it. **3.** Add it below. "
+                        "Your Google plan's limits apply; no API key is needed here.")
             with gr.Row():
-                gr.Button("Open Google Flow ↗", link="https://flow.google.com/", variant="primary")
-                gr.Button("Open Gemini ↗", link="https://gemini.google.com/app")
+                gr.Button("Open Google Flow ↗", link="https://flow.google.com/", link_target="_blank", variant="primary")
+                gr.Button("Open Gemini ↗", link="https://gemini.google.com/app", link_target="_blank")
             with gr.Accordion("Help me write a voiceover", open=False):
                 brief_topic = gr.Textbox(label="What is your video about?", lines=2)
-                brief_language = gr.Dropdown(LANGUAGES, value="Urdu", label="Language")
-                brief_count = gr.Slider(2, 6, value=4, step=1, label="Scenes")
+                with gr.Row():
+                    brief_language = gr.Dropdown(LANGUAGES, value="Urdu", label="Language")
+                    brief_count = gr.Slider(2, 6, value=4, step=1, label="Scenes")
                 brief_button = gr.Button("Prepare my writing prompt")
-                brief_output = gr.Textbox(label="Copy this into Gemini, then review its reply", lines=6)
+                brief_output = gr.Textbox(label="Copy this into Gemini, then review its reply", lines=6,
+                                          buttons=["copy"])
                 brief_button.click(browser_script_brief, [brief_topic, brief_language, brief_count], brief_output)
         with gr.Row(equal_height=False):
             with gr.Column(scale=4, elem_classes=["vs-panel"]):
                 gr.Markdown("### 1 · Add your video")
-                source = gr.File(label="Choose a video", file_types=[".mp4", ".mov", ".webm", ".mkv"])
+                source = gr.File(label="Choose a video", file_types=VIDEO_TYPES, height=150)
                 with gr.Accordion("Join several videos", open=False):
-                    uploads = gr.File(label="Add your clips", file_count="multiple", file_types=[".mp4", ".mov", ".webm", ".mkv"])
+                    uploads = gr.File(label="Add your clips", file_count="multiple", file_types=VIDEO_TYPES)
                     order = gr.Textbox(label="Change the order (optional)", placeholder="Example: 2,1,3")
                     join = gr.Button("Join my clips")
                     join_status = gr.Markdown()
                 gr.Markdown("### 2 · Make it yours")
                 caption = gr.Textbox(label="Add a caption (optional)", placeholder="Write a short line… / اردو میں لکھیں", lines=2)
-                shape = gr.Radio([("Keep original", "Original"), ("Wide", "16:9"), ("Tall", "9:16"), ("Square", "1:1")], value="Original", label="Video shape")
+                shape = gr.Radio([("Keep original", "Original"), ("Wide", "16:9"), ("Tall", "9:16"), ("Square", "1:1")],
+                                 value="Original", label="Video shape")
                 with gr.Accordion("Trim the video", open=False):
                     gr.Markdown("Keep the whole clip, or enter the part you want. End at 0 keeps everything after the start.")
                     with gr.Row():
@@ -703,27 +893,32 @@ def build_flow_workspace():
                     narration = gr.Audio(label="Record or add your narration", sources=["upload", "microphone"], type="filepath")
                     gr.Markdown("Your recording replaces the original sound and starts with your selected clip. Urdu is welcome.")
                 with gr.Accordion("Caption appearance & subtitle files", open=False):
-                    position = gr.Radio([("Choose for me", "Auto: less clutter"), ("Top", "Top"), ("Bottom", "Bottom")], value="Auto: less clutter", label="Put captions")
+                    position = gr.Radio([("Choose for me", "Auto: less clutter"), ("Top", "Top"), ("Bottom", "Bottom")],
+                                        value="Auto: less clutter", label="Put captions")
                     size = gr.Slider(.7, 1.5, value=1, step=.1, label="Text size")
-                    srt = gr.File(label="Add timed subtitles (.srt)", file_types=[".srt"])
-                    gr.Markdown("Automatic placement estimates the quieter area. You can move captions above. Subtitle times refer to the original clip.")
+                    srt = gr.File(label="Add timed subtitles (.srt)", file_types=[".srt"], height=120)
+                    gr.Markdown("Subtitle times refer to the original clip.", elem_classes=["vs-hint"])
             with gr.Column(scale=5, elem_classes=["vs-panel"]):
                 gr.Markdown("### 3 · Preview & download")
                 preview_video = gr.Video(label="Your preview", interactive=False, height=360)
                 status = gr.Markdown("Your preview will appear after you add a video.")
-                refresh = gr.Button("↻ Update preview", size="sm")
-                export = gr.Button("Download my finished video", variant="primary", interactive=False, elem_classes=["vs-make"])
-                download = gr.File(label="Your finished video", interactive=False)
-                gr.Markdown("Preview shows the first 8 seconds. Download creates your full selected video.", elem_classes=["vs-hint"])
+                with gr.Row():
+                    refresh = gr.Button("↻ Update preview", interactive=False, scale=1)
+                    export = gr.Button("Make my finished video", variant="primary", interactive=False, scale=2)
+                download = gr.File(label="Your finished video — click the size to download", interactive=False, visible=False)
+                gr.Markdown("Preview shows the first 8 seconds. The finished video is your full selection.",
+                            elem_classes=["vs-hint"])
         inputs = [source, start, end, shape, muted, caption, srt, position, size, narration]
-        source.change(lambda path: gr.Button(interactive=bool(path)), source, export, queue=False)
-        join.click(editor_join, [uploads, order], [source, join_status], concurrency_id="local_editor", concurrency_limit=1)
+        live = dict(concurrency_id="local_editor", concurrency_limit=1)
+        source.change(lambda path: (gr.update(interactive=bool(path)), gr.update(interactive=bool(path))),
+                      source, [export, refresh], queue=False)
+        join.click(editor_join, [uploads, order], [source, join_status], **live)
         for control in (source, start, end, shape, muted, srt, position, narration):
-            control.change(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1, trigger_mode="always_last")
-        caption.blur(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
-        size.release(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
-        refresh.click(editor_render, inputs, [preview_video, status], concurrency_id="local_editor", concurrency_limit=1)
-        export.click(lambda *args: editor_render(*args, preview=False), inputs, [download, status], concurrency_id="local_editor", concurrency_limit=1)
+            control.change(editor_render, inputs, [preview_video, status], trigger_mode="always_last", **live)
+        caption.blur(editor_render, inputs, [preview_video, status], **live)
+        size.release(editor_render, inputs, [preview_video, status], **live)
+        refresh.click(editor_render, inputs, [preview_video, status], **live)
+        export.click(editor_export, inputs, [download, status], **live)
     return google_help
 
 
@@ -743,6 +938,14 @@ def browser_script_brief(topic, language, scenes):
     )
 
 
+def _welcome_card(icon: str, title: str, text: str, button: str, primary: bool = False) -> gr.Button:
+    with gr.Column(elem_classes=["vs-welcome-card"]):
+        gr.HTML(f"<div class='vs-card-icon' aria-hidden='true'>{icon}</div>"
+                f"<h3 class='vs-card-title'>{html.escape(title)}</h3><p class='vs-card-text'>{html.escape(text)}</p>",
+                padding=False)
+        return gr.Button(button, variant="primary" if primary else "secondary")
+
+
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="VideoStudio") as app:
         gr.HTML(HERO_HTML)
@@ -752,33 +955,76 @@ def build_app() -> gr.Blocks:
         last_clip_video = gr.State("")
         last_story_video = gr.State("")
 
-        with gr.Row(elem_id="vs-navigation"):
-            home_button = gr.Button("⌂ Start", size="sm")
-            edit_button = gr.Button("Edit a video", size="sm")
-            create_button = gr.Button("Make a story", size="sm")
-            with gr.Accordion("More tools", open=False):
-                quick_button = gr.Button("Make an AI clip", size="sm")
-                voice_button = gr.Button("My voice", size="sm")
-                settings_button = gr.Button("Settings", size="sm")
         with gr.Tabs(selected="home", elem_id="vs-workspaces") as workspaces:
-            with gr.Tab("Start", id="home"):
+            # ---------------------------------------------------------- Start
+            with gr.Tab("🏠 Start", id="home"):
                 gr.Markdown("## What would you like to do?\nPick one. We’ll guide you from there.")
                 with gr.Row(equal_height=True):
-                    with gr.Column(elem_classes=["vs-welcome-card"]):
-                        gr.Markdown("### Use my Google plan\nCreate a clip in Flow, then add your voice, captions and finishing touches here.")
-                        home_google = gr.Button("Start with Google →", variant="primary")
-                    with gr.Column(elem_classes=["vs-welcome-card"]):
-                        gr.Markdown("### Edit a video I have\nTrim it, add a caption, record your voice, and download your finished video.")
-                        home_edit = gr.Button("Choose my video →")
-                    with gr.Column(elem_classes=["vs-welcome-card"]):
-                        gr.Markdown("### Turn an idea into a story\nWrite a topic and make a narrated video with pictures or stock clips.")
-                        home_story = gr.Button("Make my story →")
-                gr.Markdown("**New here?** Try editing one short clip first. You can leave every optional setting as it is.")
+                    home_story = _welcome_card(
+                        "📖", "Turn an idea into a story",
+                        "Write a topic and get a narrated video with pictures or stock clips.",
+                        "Make my story →", primary=True)
+                    home_edit = _welcome_card(
+                        "✂️", "Edit a video I have",
+                        "Trim it, add a caption, record your voice, and download the result.",
+                        "Choose my video →")
+                    home_google = _welcome_card(
+                        "✨", "Use my Google plan",
+                        "Create a clip in Google Flow, then finish it here with voice and captions.",
+                        "Start with Google →")
+                gr.Markdown("**New here?** Try a story first: type a topic and press one button. "
+                            "Every optional setting can stay as it is.")
+
             google_help = build_flow_workspace()
-            # ---------------------------------------------------------- Quick clip
-            with gr.Tab("AI clip", id="clip"):
+
+            # ---------------------------------------------------------- Story video
+            with gr.Tab("📖 Make a story", id="story"):
+                gr.Markdown("## Tell your story\nStart with a topic. Review the script if you like, then make your video.")
                 with gr.Row(equal_height=False):
+                    with gr.Column(scale=5, elem_classes=["vs-panel"]):
+                        story_topic = gr.Textbox(
+                            label="What is your video about?",
+                            placeholder="e.g. Why the ocean is salty",
+                        )
+                        story_shape = gr.Radio(SHAPES, value="9:16", label="Shape")
+                        with gr.Accordion("Review or write my script (optional)", open=False):
+                            with gr.Row():
+                                story_scenes = gr.Slider(*STORY_SCENES, value=3, step=1, label="Number of scenes", scale=3)
+                                script_btn = gr.Button("✍️ Write the script for me", variant="secondary", scale=2)
+                            story_script = gr.Textbox(
+                                label="Script (written for you if empty)",
+                                placeholder=("Visual: waves crashing on a rocky shore\n"
+                                             "VO: Every wave carries a pinch of salt from the land.\n"
+                                             "Visual: rivers flowing into the sea\n"
+                                             "VO: Rivers have been doing this for millions of years."),
+                                lines=7,
+                                info="Each scene needs a 'Visual:' line and a 'VO:' line. Check facts in AI drafts before rendering.",
+                            )
+                        (story_lang, story_voice, story_music, story_style,
+                         _story_quality, story_subs, story_delivery) = _more_options("Calm", with_quality=False)
+                        story_make = gr.Button("🎬 Make my video", variant="primary", elem_classes=["vs-make"])
+                        story_status = gr.Markdown()
                     with gr.Column(scale=5):
+                        story_card, story_stop, story_retry, story_video, story_files = _result_panel(420)
+                        gr.Markdown("Uses stock footage or AI pictures with gentle camera motion, "
+                                    "a narrator voice, music and subtitles.", elem_classes=["vs-hint"])
+
+                script_btn.click(write_script, [story_topic, story_scenes, story_lang], story_script)
+                story_make.click(
+                    make_story,
+                    [story_topic, story_script, story_shape, story_lang, story_voice,
+                     story_music, story_subs, story_style, story_scenes, story_delivery],
+                    [story_status, story_card, story_job_id],
+                )
+                story_stop.click(stop_job, story_job_id, story_status)
+                story_retry.click(retry_job, story_job_id, story_status)
+                story_video.change(_show_files, story_video, story_files)
+
+            # ---------------------------------------------------------- AI clip
+            with gr.Tab("🎬 AI clip", id="clip"):
+                gr.Markdown("## Make a short AI clip\nDescribe one scene and get a few seconds of AI video.")
+                with gr.Row(equal_height=False):
+                    with gr.Column(scale=5, elem_classes=["vs-panel"]):
                         clip_prompt = gr.Textbox(
                             label="What should the video show?",
                             placeholder="e.g. A paper boat drifting on a calm pond at sunrise",
@@ -794,157 +1040,125 @@ def build_app() -> gr.Blocks:
                         )
                         (clip_lang, clip_voice, clip_music, clip_style,
                          clip_quality, clip_subs, clip_delivery) = _more_options("Ambient", with_quality=True)
-                        with gr.Row():
-                            clip_make = gr.Button("🎬 Make my video", variant="primary", scale=4, elem_classes=["vs-make"])
-                            clip_stop = gr.Button("⏹ Stop", variant="stop", scale=1)
+                        clip_make = gr.Button("🎬 Make my video", variant="primary", elem_classes=["vs-make"])
                         clip_status = gr.Markdown()
                     with gr.Column(scale=5):
-                        clip_card = gr.HTML(idle_card("Your video will appear here."))
-                        clip_video = gr.Video(label="Your video", interactive=False, height=360)
-                        clip_files = gr.File(label="Captions and render report", file_count="multiple", interactive=False)
-                        gr.Markdown("<span class='vs-hint'>A 5-second clip usually takes 1–3 minutes. "
-                                    "Real AI video needs the free Hugging Face token (see Settings); "
-                                    "if the free GPUs are busy, it waits and retries by itself.</span>")
+                        clip_card, clip_stop, clip_retry, clip_video, clip_files = _result_panel(360)
+                        gr.Markdown("A 5-second clip usually takes 1–3 minutes. Real AI video needs the free "
+                                    "Hugging Face token (see Settings); if the free GPUs are busy, it waits "
+                                    "and retries by itself.", elem_classes=["vs-hint"])
 
                 improve_btn.click(improve_idea, [clip_prompt, clip_style], clip_prompt)
                 clip_make.click(
                     make_clip,
                     [clip_prompt, clip_shape, clip_seconds, clip_narration, clip_lang, clip_voice,
                      clip_music, clip_subs, clip_quality, clip_style, clip_delivery],
-                    [clip_status, clip_card, clip_video, clip_job_id],
+                    [clip_status, clip_card, clip_job_id],
                 )
                 clip_stop.click(stop_job, clip_job_id, clip_status)
-                clip_video.change(files_for_video, clip_video, clip_files)
+                clip_retry.click(retry_job, clip_job_id, clip_status)
+                clip_video.change(_show_files, clip_video, clip_files)
 
-            # ---------------------------------------------------------- Story video
-            with gr.Tab("Make a story", id="story"):
-                gr.Markdown("## Tell your story\nStart with a topic. Preview the script if you like, then make your video.")
+            # ---------------------------------------------------------- My videos
+            with gr.Tab("📁 My videos", id="library") as library_tab:
+                gr.Markdown("## My videos\nEvery story and AI clip you have made.")
                 with gr.Row(equal_height=False):
+                    with gr.Column(scale=4, elem_classes=["vs-panel"]):
+                        library_pick = gr.Dropdown(choices=library_choices(), label="Choose a video", interactive=True)
+                        library_note = gr.Markdown()
+                        folder_btn = gr.Button("📂 Open my videos folder", variant="secondary")
+                        library_delete_btn = gr.Button("🗑️ Delete this video", variant="stop", size="sm")
+                        folder_msg = gr.Markdown()
                     with gr.Column(scale=5):
-                        story_topic = gr.Textbox(
-                            label="What is your video about?",
-                            placeholder="e.g. Why the ocean is salty",
-                        )
-                        with gr.Accordion("Review or write my script (optional)", open=False):
-                            with gr.Row():
-                                story_scenes = gr.Slider(*STORY_SCENES, value=3, step=1, label="Number of scenes", scale=3)
-                                script_btn = gr.Button("✍️ Write the script for me", variant="secondary", scale=2)
-                            story_script = gr.Textbox(
-                                label="Script (optional — written for you if empty)",
-                                placeholder=("Visual: waves crashing on a rocky shore\n"
-                                             "VO: Every wave carries a pinch of salt from the land.\n"
-                                             "Visual: rivers flowing into the sea\n"
-                                             "VO: Rivers have been doing this for millions of years."),
-                                lines=7,
-                                info="Each scene needs a 'Visual:' line and a 'VO:' line. Review AI drafts and verify factual claims before rendering.",
-                            )
-                        story_shape = gr.Radio(SHAPES, value="9:16", label="Shape")
-                        (story_lang, story_voice, story_music, story_style,
-                         _story_quality, story_subs, story_delivery) = _more_options("Calm", with_quality=False)
-                        with gr.Row():
-                            story_make = gr.Button("🎬 Make my video", variant="primary", scale=4, elem_classes=["vs-make"])
-                            story_stop = gr.Button("⏹ Stop", variant="stop", scale=1)
-                        story_status = gr.Markdown()
-                    with gr.Column(scale=5):
-                        story_card = gr.HTML(idle_card("Your video will appear here."))
-                        story_video = gr.Video(label="Your video", interactive=False, height=420)
-                        story_files = gr.File(label="Captions and render report", file_count="multiple", interactive=False)
-                        gr.Markdown("<span class='vs-hint'>Uses stock footage or AI pictures with gentle "
-                                    "camera motion, a narrator voice, music and subtitles.</span>")
-
-                script_btn.click(write_script, [story_topic, story_scenes, story_lang], story_script)
-                story_make.click(
-                    make_story,
-                    [story_topic, story_script, story_shape, story_lang, story_voice,
-                     story_music, story_subs, story_style, story_scenes, story_delivery],
-                    [story_status, story_card, story_video, story_job_id],
-                )
-                story_stop.click(stop_job, story_job_id, story_status)
-                story_video.change(files_for_video, story_video, story_files)
+                        library_video = gr.Video(label="Video", interactive=False, height=400)
+                        library_files = gr.File(label="Captions and render report", file_count="multiple",
+                                                interactive=False, visible=False)
+                library_outputs = [library_pick, library_video, library_files, library_note]
+                library_tab.select(library_refresh, library_pick, library_outputs)
+                library_pick.input(library_show, library_pick, [library_video, library_files])
+                library_delete_btn.click(library_delete, library_pick, library_outputs)
+                folder_btn.click(open_videos_folder, None, folder_msg)
 
             # ---------------------------------------------------------- My voice
             with gr.Tab("🎙️ My voice", id="voice"):
                 gr.Markdown(
-                    "Make the narrator sound like **you**. Free, and your recording stays on this computer "
-                    "(it is only sent to the free voice service while a video is being made).\n\n"
+                    "## Make the narrator sound like you\n"
                     "**1.** Record yourself reading anything for **10 to 20 seconds** in a quiet room "
                     "(or upload a recording). **2.** Press **Save my voice**. "
                     f"**3.** When making a video, open *More options* and choose **Voice → {MY_VOICE}**."
                 )
                 with gr.Row(equal_height=False):
-                    with gr.Column(scale=5):
+                    with gr.Column(scale=5, elem_classes=["vs-panel"]):
                         voice_rec = gr.Audio(sources=["microphone", "upload"], type="filepath",
                                              label="Your voice (10 to 20 seconds)")
                         with gr.Row():
                             voice_save = gr.Button("💾 Save my voice", variant="primary", scale=3)
                             voice_delete = gr.Button("🗑️ Delete", variant="secondary", scale=1)
                         voice_msg = gr.Markdown(my_voice_status())
-                    with gr.Column(scale=5):
+                    with gr.Column(scale=5, elem_classes=["vs-panel"]):
                         voice_test_lang = gr.Dropdown(list(CLONE_LANG_CODES), value="English", label="Test language")
                         voice_test = gr.Button("▶ Test my voice", variant="secondary")
                         voice_test_audio = gr.Audio(label="Test result", interactive=False)
                         voice_test_msg = gr.Markdown()
-                        gr.Markdown(
-                            "<span class='vs-hint'>Works in " + ", ".join(CLONE_LANG_CODES) + ". "
-                            "Urdu and Punjabi are not supported by the free cloning model yet, so those use the "
-                            "standard voices. The result is a close likeness, not a perfect copy. Each few "
-                            "sentences use about a minute of your free daily GPU time. "
-                            "Only use your own voice, or one you have permission to use.</span>")
-                voice_save.click(save_my_voice, voice_rec, voice_msg)
-                voice_delete.click(delete_my_voice, None, voice_msg)
+                gr.Markdown(
+                    "Works in " + ", ".join(CLONE_LANG_CODES) + ". Urdu and Punjabi are not supported by the "
+                    "free cloning model yet. The result is a close likeness, not a perfect copy. Each few "
+                    "sentences use about a minute of your free daily GPU time. Your recording stays on this "
+                    "computer and is only sent to the free voice service while a video is being made. "
+                    "Only use your own voice, or one you have permission to use.", elem_classes=["vs-hint"])
+                # Saving or deleting also moves the Voice choice on both makers.
+                voice_pickers = [story_voice, clip_voice]
+                voice_save.click(save_my_voice, voice_rec, voice_msg).then(
+                    lambda: (default_voice(), default_voice()), None, voice_pickers)
+                voice_delete.click(delete_my_voice, None, voice_msg).then(
+                    lambda: (default_voice(), default_voice()), None, voice_pickers)
                 voice_test.click(test_my_voice, voice_test_lang, [voice_test_audio, voice_test_msg])
 
             # ---------------------------------------------------------- Settings
             with gr.Tab("⚙️ Settings", id="settings"):
-                gr.Markdown(
-                    "Story video works **without** any key. Real AI video in Quick clip needs the free "
-                    "Hugging Face token; the other keys just give better results. "
-                    "Keys are saved only on this computer and are never shown again in this page."
-                )
+                gr.Markdown("## Settings\nStories work **without** any key. Keys are saved only on this "
+                            "computer and are never shown again on this page.")
                 cfg = STUDIO.config
-                with gr.Row():
-                    with gr.Column():
-                        cfg_gemini = gr.Textbox(label="Gemini API key — smarter prompts & scripts",
-                                                placeholder=secret_placeholder(cfg.gemini_api_key), type="password",
-                                                info="Free key: aistudio.google.com/apikey")
-                        cfg_hf = gr.Textbox(label="Hugging Face token — more free GPU time",
-                                            placeholder=secret_placeholder(cfg.hf_token), type="password",
-                                            info="huggingface.co/settings/tokens (read access is enough)")
-                        cfg_pexels = gr.Textbox(label="Pexels key — real stock video for stories",
-                                                placeholder=secret_placeholder(cfg.pexels_api_key), type="password",
-                                                info="pexels.com/api")
-                        cfg_pixabay = gr.Textbox(label="Pixabay key — more stock video",
-                                                 placeholder=secret_placeholder(cfg.pixabay_api_key), type="password",
-                                                 info="pixabay.com/api/docs")
-                        cfg_colab = gr.Textbox(label="Colab worker URL (advanced)", value=cfg.colab_url,
-                                               placeholder="https://xxxx.gradio.live",
-                                               info="From colab_worker.ipynb — your own free T4 GPU")
+                with gr.Row(equal_height=False):
+                    with gr.Column(elem_classes=["vs-panel"]):
+                        gr.Markdown("### The one key worth adding\nIt unlocks real AI video and **My voice**. "
+                                    "Free: make an account at [huggingface.co](https://huggingface.co/settings/tokens), "
+                                    "open *Settings → Access Tokens*, create a **Read** token and paste it here.")
+                        cfg_hf = gr.Textbox(label="Hugging Face token",
+                                            placeholder=secret_placeholder(cfg.hf_token), type="password")
+                        with gr.Accordion("More keys (optional)", open=False):
+                            cfg_gemini = gr.Textbox(label="Gemini API key — smarter prompts & scripts",
+                                                    placeholder=secret_placeholder(cfg.gemini_api_key), type="password",
+                                                    info="Free key: aistudio.google.com/apikey")
+                            cfg_pexels = gr.Textbox(label="Pexels key — real stock video for stories",
+                                                    placeholder=secret_placeholder(cfg.pexels_api_key), type="password",
+                                                    info="pexels.com/api")
+                            cfg_pixabay = gr.Textbox(label="Pixabay key — more stock video",
+                                                     placeholder=secret_placeholder(cfg.pixabay_api_key), type="password",
+                                                     info="pixabay.com/api/docs")
+                            cfg_colab = gr.Textbox(label="Colab worker URL (advanced)", value=cfg.colab_url,
+                                                   placeholder="https://xxxx.gradio.live",
+                                                   info="From colab_worker.ipynb — your own free T4 GPU")
                         save_btn = gr.Button("💾 Save settings", variant="primary")
                         save_msg = gr.Markdown()
-                    with gr.Column():
-                        gr.Markdown("**Video engines**")
+                    with gr.Column(elem_classes=["vs-panel"]):
+                        gr.Markdown("### Video engines")
                         backend_box = gr.HTML(backend_status_html())
-                        gr.Markdown("**Recent videos**")
-                        queue_box = gr.HTML(render_queue_table())
-                        folder_btn = gr.Button("📂 Open my videos folder", variant="secondary")
-                        off_btn = gr.Button("⏻ Turn off VideoStudio", variant="secondary")
-                        off_msg = gr.Markdown()
                         with gr.Accordion("Technical log", open=False):
                             log_box = gr.Textbox(lines=10, interactive=False, show_label=False)
                             gr.Button("Refresh log", size="sm").click(read_system_logs, None, log_box)
-                        gr.Markdown(f"<span class='vs-hint'>{html.escape(STUDIO.probe.summary())}</span>")
+                            gr.Markdown(html.escape(STUDIO.probe.summary()), elem_classes=["vs-hint"])
+                        off_btn = gr.Button("⏻ Turn off VideoStudio", variant="secondary")
+                        off_msg = gr.Markdown()
 
                 save_btn.click(
-                    save_api_credentials, [cfg_colab, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini], save_msg,
-                ).then(backend_status_html, None, backend_box)
-                folder_btn.click(open_videos_folder)
+                    save_settings, [cfg_colab, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini],
+                    [save_msg, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini, backend_box],
+                )
                 off_btn.click(turn_off, None, off_msg)
 
-        for button, destination in ((home_button, "home"), (edit_button, "flow_editor"),
-                                    (create_button, "story"), (quick_button, "clip"),
-                                    (voice_button, "voice"), (settings_button, "settings"),
-                                    (home_edit, "flow_editor"), (home_story, "story")):
-            button.click(lambda target=destination: gr.Tabs(selected=target), outputs=workspaces)
+        home_story.click(lambda: gr.Tabs(selected="story"), outputs=workspaces)
+        home_edit.click(lambda: gr.Tabs(selected="flow_editor"), outputs=workspaces)
         home_google.click(lambda: (gr.Tabs(selected="flow_editor"), gr.Accordion(open=True)),
                           outputs=[workspaces, google_help])
 
@@ -953,11 +1167,10 @@ def build_app() -> gr.Blocks:
 
         # Reconnect to running/finished jobs after a refresh, then keep in sync.
         sync_outputs = [clip_card, clip_video, clip_job_id, story_card, story_video, story_job_id,
-                        last_clip_video, last_story_video]
+                        last_clip_video, last_story_video, clip_stop, clip_retry, story_stop, story_retry]
         sync_inputs = [last_clip_video, last_story_video]
         app.load(sync_job_outputs, sync_inputs, sync_outputs)
-        gr.Timer(2.0).tick(sync_job_outputs, sync_inputs, sync_outputs)
-        gr.Timer(5.0).tick(render_queue_table, None, queue_box)
+        gr.Timer(2.0).tick(sync_job_outputs, sync_inputs, sync_outputs, show_progress="hidden")
         app.load(read_system_logs, None, log_box)
 
     return app
@@ -974,6 +1187,7 @@ def launch_app(server_port: int = 7860):
         theme=THEME,
         css=CSS,
         show_error=True,
+        footer_links=[],
     )
 
 
