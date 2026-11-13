@@ -51,7 +51,7 @@ VideoStudio runs on your computer, but the heavy diffusion work is sent to free 
 **Voice cloning** uses the free `ResembleAI/Chatterbox-Multilingual-TTS` Space. Narration is sent in pieces of up to 280 characters (the Space cuts anything past 300) and joined with FFmpeg. Each piece costs about a minute of the free daily GPU time. Your recording is stored only in `outputs/voices/` and is uploaded to that Space while a video is being made.
 
 **📖 Make a story** (script-to-video). You write `Visual:` / `VO:` lines, or have them drafted for you (Gemini if you set a key, otherwise a free Pollinations text model, otherwise a clear error asking you to paste a script). Each scene gets:
-- a stock clip from Pexels or Pixabay, or a still image from Wikimedia or Pollinations, animated with Ken Burns motion
+- a stock clip from Pexels or Pixabay, or a still image from Pexels, Pixabay, Wikimedia or Pollinations, animated with Ken Burns motion. Searches use the first few concrete words of the visual line (Pixabay rejects queries over 100 characters); if they find nothing, the first three words are tried. A file near the output size is chosen, not a 4K download.
 - its own narration
 
 Narration and subtitles are timed to each scene's on-screen slot, so they stay in sync across crossfades.
@@ -86,6 +86,8 @@ Narration and subtitles are timed to each scene's on-screen slot, so they stay i
 
 Keys saved in the Settings tab go to `studio_config.json`, which is git-ignored. They are never sent back to the page.
 
+Surrounding spaces and quotes in pasted keys are removed. A key the provider rejects (HTTP 401/403), an exhausted limit (429) or an unavailable Gemini model is written once to the technical log (**⚙️ Settings → Technical log**) instead of failing silently.
+
 ## Install and run
 
 ```bash
@@ -100,10 +102,12 @@ python app.py                   # opens http://127.0.0.1:7860
 
 On Windows, `run_videostudio.vbs` starts the studio silently in the background (no console window) and opens the browser. `Install Desktop Shortcut.vbs` creates the **VideoStudio** desktop icon for it and repairs older VideoStudio shortcuts after the folder is moved; the launcher also recreates the icon if it is missing. `Start Video Studio.bat` does the same in a visible console window, which is handy for seeing errors. `python video_studio.py --probe` prints hardware and backend diagnostics.
 
-### Optional: free Colab GPU worker
+### Optional: your own Colab GPU worker
 1. Open [`colab_worker.ipynb`](colab_worker.ipynb) in Google Colab.
-2. Select a T4 GPU and run all cells.
-3. Paste the printed `*.gradio.live` URL into **⚙️ Settings → More keys → Colab worker URL**.
+2. **Runtime → Change runtime type**: with Colab Pro pick **L4** or **A100** (several times faster); on a **T4**, switch **High-RAM** on. On a T4 with standard RAM the 11 GB text encoder does not fit, and the first cell says so instead of crashing the session.
+3. **Run all**, then paste the printed `*.gradio.live` URL into **⚙️ Settings → More keys → Colab worker URL**, press **💾 Save settings**, then **🔄 Check connection**.
+
+The notebook adapts to the GPU: on L4/A100 the text encoder runs on the GPU, and A100 keeps every model loaded. A T4 renders about one step a minute, so steps are capped at 25 there. The job card shows the worker's step progress; the studio keeps waiting while steps advance and gives up only after 45 minutes without progress. If the same chunk is sent again (after a restart or retry), the worker returns the clip it already made. Wan's own requirements are installed without its `numpy<2` and `flash_attn` pins, which would otherwise break Colab's NumPy or spend half an hour compiling.
 
 ## Refresh and job recovery
 

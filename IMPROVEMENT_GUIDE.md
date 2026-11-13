@@ -105,3 +105,17 @@ The story screen shows the topic, shape and make button. The script editor and s
 - Improve my idea waited 6 s for a service that needs 10 to 20 s, then pasted the offline style template into the box. It now waits up to 30 s and leaves the text unchanged, with a message, if no AI answers.
 - A failed video's card shows the reason in plain view.
 - Tall AI pictures were often two pictures stacked. They are now requested at 3:4 and cropped.
+
+### Colab GPU worker and API keys
+- Installing Wan's requirements on Colab downgraded NumPy to 1.x (`numpy<2` pin), which breaks Colab's preinstalled packages until a restart, and tried to compile `flash_attn`. Those pins, and torch/torchvision/gradio, are now skipped.
+- On a T4 with standard RAM, loading the 11 GB text encoder on the CPU crashed the session. Checkpoints are now memory-mapped, and the first cell stops with clear steps (turn on High-RAM, or pick L4/A100) instead of crashing.
+- Colab Pro GPUs are used properly: on L4/A100 the text encoder runs on the GPU; A100 keeps all models loaded. T4 renders are capped at 25 steps, the studio waits up to 45 minutes, and the 1.3B model's recommended `sample_shift` of 8 is used.
+- Pixabay rejected any query over 100 characters (HTTP 400), and long cinematic prompts found nothing on Pexels. Searches now use a short keyword query, then its first three words.
+- Pexels and Pixabay ranked 4K files first, so a 1080p video downloaded 100+ MB files that often timed out. The file nearest the output size is now chosen. Pixabay photos are searched too.
+- A rejected key, an exhausted limit or a missing Gemini model was logged only at debug level. Each now shows once in the technical log. Pasted keys lose stray spaces and quotes.
+- Wikimedia requests now send a descriptive User-Agent, search only files and download scaled copies instead of full-size originals.
+
+### Fixes from a real error log
+- **`colab: no response within 1800s`**: the worker was busy, not dead. A T4 chunk takes 20–30 minutes, and every retry or restart sent the same chunk again, which queued behind the render still running. The studio now follows the worker's progress ("step 7/25" on the card). It waits as long as steps advance or the request is waiting its turn, and gives up only after 45 minutes with no progress or 3 hours in total. The worker returns a finished clip at once when the same chunk is sent again.
+- **All free Hugging Face backends: `exceeded your ZeroGPU runs limit`**: this is the daily free quota, but the studio retried every 1–5 minutes. Retries now back off: 2, 4, 8, 16, 32 minutes, then every 45 minutes.
+- **`Your saved voice could not be cloned: today's free GPU time is used up`** failed a whole story. If no scene has used the cloned voice yet, the video now uses the standard voice and the result card says why. If some scenes already used it, the job waits for quota and keeps the finished scenes, so one video never mixes two voices. Each scene's checkpoint records its voice, so this holds after a restart too.

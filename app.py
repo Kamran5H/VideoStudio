@@ -36,6 +36,7 @@ from video_studio import (
     QualityError,
     Stage,
     VideoStudio,
+    clean_secret,
     language_mismatch,
     log,
     spoken_lines,
@@ -729,7 +730,7 @@ CLEAR_SECRET = "-"
 def merge_secret(current: str, submitted: Optional[str]) -> str:
     """Secret fields are never pre-filled in the page, so an empty submission
     means "keep the saved value"; a single '-' clears it."""
-    value = (submitted or "").strip()
+    value = clean_secret(submitted)
     if not value:
         return current
     return "" if value == CLEAR_SECRET else value
@@ -741,7 +742,7 @@ def secret_placeholder(current: str) -> str:
 
 def save_api_credentials(colab_url: str, hf_tok: str, pexels_k: str, pixabay_k: str, gemini_k: str) -> str:
     cfg = STUDIO.config
-    url = (colab_url or "").strip().rstrip("/")
+    url = clean_secret(colab_url).rstrip("/")
     if url and not url.lower().startswith(("http://", "https://")):
         return "❌ The Colab worker URL must start with https:// — nothing was saved."
     cfg.colab_url = url

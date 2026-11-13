@@ -337,6 +337,14 @@ class HardwareProbe:
 # 2. Configuration Layer
 # ----------------------------------------------------------------------------
 
+def clean_secret(value: Any) -> str:
+    """A key/URL as the provider expects it: no surrounding whitespace or quotes."""
+    text = value.strip() if isinstance(value, str) else ""
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
+
 @dataclass
 class StudioConfig:
     """Master configuration for the entire unified VideoStudio suite.
@@ -364,6 +372,12 @@ class StudioConfig:
     max_videos_kept: int = 60                 # prune older finished videos on start
 
     def __post_init__(self):
+        # Keys pasted from a web page or a .env line often carry spaces or
+        # quotes ("abc123" / 'abc123'); providers then answer 401 and the key
+        # looks broken. Clean every key and the worker URL first.
+        for name in ("hf_token", "pexels_api_key", "pixabay_api_key", "gemini_api_key"):
+            setattr(self, name, clean_secret(getattr(self, name)))
+        self.colab_url = clean_secret(self.colab_url).rstrip("/")
         # Auto-load API keys from environment if empty
         if not self.hf_token:
             self.hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")
@@ -373,6 +387,8 @@ class StudioConfig:
             self.pixabay_api_key = os.environ.get("PIXABAY_API_KEY", "")
         if not self.gemini_api_key:
             self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+        for name in ("hf_token", "pexels_api_key", "pixabay_api_key", "gemini_api_key"):
+            setattr(self, name, clean_secret(getattr(self, name)))
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         # Atomic: a crash mid-write must not leave a truncated config (which
@@ -654,6 +670,64 @@ def gemini_models() -> List[str]:
     return models or list(DEFAULT_GEMINI_MODELS)
 
 
+_GEMINI_UNAVAILABLE_MODELS: set[str] = set()
+_GEMINI_WARNED: set[str] = set()
+GEMINI_TIMEOUT_SECONDS = 45
+
+
+def _gemini_warn_once(key: str, message: str, *args: Any) -> None:
+    if key not in _GEMINI_WARNED:
+        _GEMINI_WARNED.add(key)
+        log.warning(message, *args)
+
+
+def gemini_generate(api_key: str, contents: str, accept: Callable[[str], bool]) -> Optional[str]:
+    """First Gemini reply that `accept` approves, trying gemini_models() in order.
+
+    A model name Google does not serve (404) is remembered and skipped for
+    the rest of the session; a rejected key (400/401/403) stops at once with
+    one readable warning instead of silently retrying every model; each call
+    is bounded so a stalled request cannot hold the job queue.
+    """
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+        try:
+            client = genai.Client(api_key=api_key,
+                                  http_options=genai_types.HttpOptions(timeout=GEMINI_TIMEOUT_SECONDS * 1000))
+        except Exception:
+            client = genai.Client(api_key=api_key)
+    except Exception as exc:
+        _gemini_warn_once("sdk", "Gemini is not available (%s). Run: pip install google-genai", exc)
+        return None
+
+    for model_name in gemini_models():
+        if model_name in _GEMINI_UNAVAILABLE_MODELS:
+            continue
+        try:
+            resp = client.models.generate_content(model=model_name, contents=contents)
+        except Exception as exc:
+            text = str(exc)
+            low = text.lower()
+            if "api_key_invalid" in low or "api key not valid" in low or "permission_denied" in low \
+                    or re.search(r"\b(401|403)\b", text):
+                _gemini_warn_once("key", "Gemini rejected the API key; check it in Settings (%s).", text[:160])
+                return None
+            if re.search(r"\b404\b", text) or "not_found" in low or "is not found" in low:
+                _GEMINI_UNAVAILABLE_MODELS.add(model_name)
+                log.info("Gemini model %s is not available for this key; skipping it.", model_name)
+                continue
+            if re.search(r"\b429\b", text) or "resource_exhausted" in low:
+                log.info("Gemini model %s is rate-limited; trying the next one.", model_name)
+                continue
+            log.debug("Gemini model %s failed: %s", model_name, exc)
+            continue
+        reply = (getattr(resp, "text", None) or "").strip()
+        if reply and accept(reply):
+            return reply
+    return None
+
+
 def narration_brief(language: str) -> str:
     brief = (
         "VOICEOVER DIRECTION: Speak to one curious viewer in a warm, conversational voice. "
@@ -692,31 +766,17 @@ class FreeLLMPromptEnhancer:
 
         # 1. Try Gemini AI Pro Plan (Google GenAI SDK)
         if gemini_key:
-            try:
-                from google import genai
-                client = genai.Client(api_key=gemini_key)
-                style_data = STYLE_PRESETS.get(style, STYLE_PRESETS["Cinematic"])
-                sys_inst = (
-                    f"Rewrite the idea as one achievable continuous video shot in the '{style}' aesthetic. "
-                    "Preserve every specified subject, action, location, time of day and exclusion. "
-                    "Add only compatible camera and lighting details; do not invent events or extra subjects. "
-                    f"Suggested color treatment: {style_data['grade']}. "
-                    "Output ONLY the prompt text, no commentary, under 75 words."
-                )
-
-                for model_name in gemini_models():
-                    try:
-                        resp = client.models.generate_content(
-                            model=model_name,
-                            contents=f"{sys_inst}\n\nUser Concept: {clean_p}"
-                        )
-                        if resp.text and looks_like_prompt(resp.text):
-                            return resp.text.strip().replace('"', '')
-                    except Exception as e_mod:
-                        log.debug("Gemini model %s note: %s", model_name, e_mod)
-                        continue
-            except Exception as exc:
-                log.debug("Gemini Pro API pass-through: %s", exc)
+            style_data = STYLE_PRESETS.get(style, STYLE_PRESETS["Cinematic"])
+            sys_inst = (
+                f"Rewrite the idea as one achievable continuous video shot in the '{style}' aesthetic. "
+                "Preserve every specified subject, action, location, time of day and exclusion. "
+                "Add only compatible camera and lighting details; do not invent events or extra subjects. "
+                f"Suggested color treatment: {style_data['grade']}. "
+                "Output ONLY the prompt text, no commentary, under 75 words."
+            )
+            reply = gemini_generate(gemini_key, f"{sys_inst}\n\nUser Concept: {clean_p}", looks_like_prompt)
+            if reply:
+                return reply.replace('"', '')
 
         # 2. Try Pollinations Free LLM Endpoint (No key / Zero billing)
         try:
@@ -754,33 +814,22 @@ class FreeLLMPromptEnhancer:
 
         # 1. Try Gemini AI Pro Plan for Scriptwriting
         if gemini_key:
-            try:
-                from google import genai
-                client = genai.Client(api_key=gemini_key)
-                sys_inst = (
-                    f"You are an award-winning documentary & cinematic video director. "
-                    f"Write an engaging {scene_count}-scene video script about '{prompt}' in {language}. "
-                    "For each scene, structure it EXACTLY as:\n\n"
-                    "Visual: [3-5 concrete visual keywords for footage or image generation, e.g., golden sunrise mountains drone aerial]\n"
-                    f"VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
-                    "Give each scene a distinct purpose: hook, explanation, concrete detail, then payoff. "
-                    "Keep visuals specific to the narration and vary shot scale without changing the subject. "
-                    "Use cautious factual language. Do not invent statistics, quotations or historical claims. "
-                    "Output ONLY the Visual: and VO: lines without headers or numbering."
-                )
-                sys_inst += "\n" + narration_brief(language)
-                for model_name in gemini_models():
-                    try:
-                        resp = client.models.generate_content(
-                            model=model_name,
-                            contents=sys_inst
-                        )
-                        if resp.text and usable(resp.text):
-                            return resp.text.strip()
-                    except Exception:
-                        continue
-            except Exception as e:
-                log.debug("Gemini script generation fallback: %s", e)
+            sys_inst = (
+                f"You are an award-winning documentary & cinematic video director. "
+                f"Write an engaging {scene_count}-scene video script about '{prompt}' in {language}. "
+                "For each scene, structure it EXACTLY as:\n\n"
+                "Visual: [3-5 concrete English visual keywords for stock footage or image generation, "
+                "e.g., golden sunrise mountains drone aerial]\n"
+                f"VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
+                "Give each scene a distinct purpose: hook, explanation, concrete detail, then payoff. "
+                "Keep visuals specific to the narration and vary shot scale without changing the subject. "
+                "Use cautious factual language. Do not invent statistics, quotations or historical claims. "
+                "Output ONLY the Visual: and VO: lines without headers or numbering."
+            )
+            sys_inst += "\n" + narration_brief(language)
+            reply = gemini_generate(gemini_key, sys_inst, usable)
+            if reply:
+                return reply
 
         # 2. Free Pollinations text model (no key, no billing)
         try:
@@ -940,6 +989,17 @@ def quota_wait_seconds(error_text: str) -> Optional[int]:
     if m2:
         need = int(m2.group(1)) - int(m2.group(2))
     return max(hint, min(need, 3600), 60) + 20
+
+def deferral_wait(hint_seconds: float, deferrals: int, cap_seconds: int = 2700) -> int:
+    """Seconds before a deferred job tries again.
+
+    Hugging Face often says "Try again in 0:00:00" or nothing at all when the
+    DAILY free quota is gone, so its hint alone made the studio retry every
+    1-5 minutes all day. Back off instead: 2, 4, 8, 16, 32 minutes, then the
+    cap, but never sooner than the provider's own hint (up to the cap)."""
+    backoff = 120 * 2 ** max(0, min(int(deferrals) - 1, 6))
+    return int(max(30, min(max(float(hint_seconds or 0), backoff), max(cap_seconds, 60))))
+
 
 def quota_needs_token(error_text: str) -> bool:
     """True when Hugging Face itself says the caller should sign in for quota.
@@ -1147,6 +1207,28 @@ class ColabBackend(GenerationBackend):
         return (True, "connected")
 
     @staticmethod
+    def _describe_status(status: Any) -> Tuple[Any, str]:
+        """(change signature, message) for a gradio_client status update."""
+        if status is None:
+            return None, ""
+        code = getattr(getattr(status, "code", None), "name", str(getattr(status, "code", "")))
+        rank = getattr(status, "rank", None)
+        units = getattr(status, "progress_data", None) or []
+        unit = units[0] if units else None
+        index = getattr(unit, "index", None) if unit else None
+        length = getattr(unit, "length", None) if unit else None
+        if code in ("IN_QUEUE", "JOINING_QUEUE"):
+            ahead = int(rank or 0)          # waiting requests ahead, not counting the one rendering
+            msg = ("Colab worker: finishing an earlier render; yours is next" if ahead <= 0 else
+                   f"Colab worker: finishing an earlier render; {ahead} more request(s) before yours")
+            return (code, ahead), msg
+        if index is not None and length:
+            return (code, index), f"Colab worker: rendering, step {int(index)}/{int(length)}"
+        if code in ("PROCESSING", "PROGRESS", "ITERATING"):
+            return (code,), "Colab worker: rendering..."
+        return (code, rank), ""
+
+    @staticmethod
     def _snap_wan13b(w: int, h: int) -> tuple[int, int]:
         """Wan2.1-T2V-1.3B only supports 832x480 (landscape) and 480x832
         (portrait). Any other bucket makes the model error, so snap to the
@@ -1167,16 +1249,29 @@ class ColabBackend(GenerationBackend):
                     raise ColabRenderPending(30, reason="Colab is finishing an earlier clip")
                 self._pending = None
         if self._pending is None:
-            client = self._get_client()
-            progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {steps} steps...")
-            self._pending = (key, client.submit(*args, api_name="/generate"), time.monotonic())
+            try:
+                client = self._get_client()
+                progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {steps} steps...")
+                self._pending = (key, client.submit(*args, api_name="/generate"), time.monotonic())
+            except Exception:
+                # A dead or expired worker URL: drop the broken connection so
+                # the next attempt (or a new URL) starts fresh.
+                self.reset_client()
+                raise
         _, job, started = self._pending
         remaining = max(1, self.MAX_PENDING_SECONDS - (time.monotonic() - started))
         try:
             result = job.result(timeout=min(self.PREDICT_TIMEOUT, remaining))
         except (TimeoutError, concurrent.futures.TimeoutError) as exc:
             if not job.done() and time.monotonic() - started < self.MAX_PENDING_SECONDS:
-                raise ColabRenderPending(15, reason="Colab is still rendering this clip") from exc
+                try:
+                    _, msg = self._describe_status(job.status())
+                except Exception:
+                    msg = ""
+                if msg:
+                    progress(msg)
+                reason = msg.replace("Colab worker: ", "Colab: ") if msg else "Colab is still rendering this clip"
+                raise ColabRenderPending(15, reason=reason) from exc
             self._pending = None
             raise TimeoutError("Colab render timed out") from exc
         except Exception:
@@ -1430,6 +1525,45 @@ class TestPatternBackend(GenerationBackend):
 # 5. Media & Stock Asset Fetcher
 # ----------------------------------------------------------------------------
 
+_STOCK_STOPWORDS = frozenset("""
+a an the and or but of to in on at by for with from into onto over under above below about as is are was were
+be been being it its this that these those there their his her our your my we you they he she them us very
+some any each every while then than so such just also only same other another more most much many few
+through across along near around inside outside behind between toward towards beneath under up down
+shot scene video footage clip image picture photo showing shows show cinematic cinematography film filmic
+still motion moving
+style aesthetic visual treatment camera lens mm wide angle close closeup up slow motion dolly pan tilt
+tracking steadicam handheld gimbal drone aerial view frame framing lighting light lit color colour colors
+grading graded grade tone mood atmosphere atmospheric high quality detailed ultra hd 4k 8k k realistic
+photorealistic hyper masterpiece beautiful stunning epic dramatic
+""".split())
+
+
+def stock_query(text: str, max_words: int = 6, max_chars: int = 90) -> str:
+    """Short keyword query for stock search engines.
+
+    Pixabay rejects a ``q`` longer than 100 characters (HTTP 400) and both
+    Pexels and Pixabay return nothing for a 40-word cinematic prompt. Keep
+    the first few concrete words: the subject usually comes first.
+    """
+    text = re.sub(r"(?is)\bvisual treatment:.*$", "", text or "")
+    for preset in STYLE_PRESETS.values():           # an enhanced prompt starts with one
+        if text.startswith(preset["prefix"]):
+            text = text[len(preset["prefix"]):]
+            break
+    words = re.findall(r"[^\W\d_][\w'-]*", text, flags=re.UNICODE)
+    picked: List[str] = []
+    for word in words:
+        low = word.lower().strip("'-")
+        if len(low) < 2 or low in _STOCK_STOPWORDS or low in (w.lower() for w in picked):
+            continue
+        picked.append(low)
+        if len(picked) >= max_words:
+            break
+    query = " ".join(picked) or " ".join(words[:max_words]).lower()
+    return query[:max_chars].rsplit(" ", 1)[0] if len(query) > max_chars else query
+
+
 class MediaFetcher:
     """Intelligent Media & Stock Asset Fetcher (Pexels, Pixabay, Wikimedia, Pollinations Flux AI, Gemini)."""
 
@@ -1440,6 +1574,27 @@ class MediaFetcher:
         self.cache_dir = DEFAULT_OUTPUT_DIR / "media_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._recent_assets: List[str] = []
+        self._warned: set[str] = set()
+
+    def _api_ok(self, provider: str, resp: Any) -> bool:
+        """True for HTTP 200. Otherwise log ONE readable warning per provider
+        and status, so a wrong key or an exhausted limit is visible in the
+        log instead of silently falling through to other sources."""
+        status = getattr(resp, "status_code", 0)
+        if status == 200:
+            return True
+        hints = {
+            400: "the search was rejected",
+            401: "the API key was rejected — check it in Settings",
+            403: "the API key was rejected — check it in Settings",
+            429: "the request limit is reached for now; it resets by itself",
+        }
+        key = f"{provider}:{status}"
+        if key not in self._warned:
+            self._warned.add(key)
+            log.warning("%s stock search failed (HTTP %s): %s.", provider, status,
+                        hints.get(status, "the service is unavailable right now"))
+        return False
 
     def _stock_asset(self, source: str, asset_id: Any, url: str, suffix: str,
                      min_bytes: int) -> Optional[str]:
@@ -1456,11 +1611,22 @@ class MediaFetcher:
 
     @staticmethod
     def _framing_score(item: dict, width: int, height: int) -> float:
-        """Prefer files that retain detail after the requested aspect-ratio crop."""
-        w, h = item.get("width", 0), item.get("height", 0)
-        if not w or not h:
+        """Lower is better: the right shape first, then the right size.
+
+        The aspect term keeps detail after the crop. The size term prefers a
+        file at about the output size: an upscaled file loses detail, while a
+        4K file for a 1080p video only costs a slow 100+ MB download that
+        often times out (the old score ranked 4K first)."""
+        try:
+            w, h = float(item.get("width") or 0), float(item.get("height") or 0)
+        except (TypeError, ValueError):
             return float("inf")
-        return abs(math.log((w / h) / (width / height))) * 4 + max(width / w, height / h)
+        if w <= 0 or h <= 0 or width <= 0 or height <= 0:
+            return float("inf")
+        aspect = abs(math.log((w / h) / (width / height))) * 4
+        scale = max(width / w, height / h)          # >1: the file must be upscaled
+        size = (scale - 1) * 2 if scale > 1 else (1 / scale - 1) * 0.25
+        return aspect + size
 
     def fetch_scene_visual(
         self,
@@ -1477,38 +1643,42 @@ class MediaFetcher:
         reused only if every provider fails. A new storyboard scene should not
         use this option: the previous visual may not illustrate its narration.
         """
-        clean_q = re.sub(r"[^\w\s]", " ", prompt).strip()
+        clean_q = stock_query(prompt) or re.sub(r"[^\w\s]", " ", prompt).strip()[:90]
+        # A narrower query first; if it finds nothing, the first three words.
+        queries = [clean_q]
+        short_q = " ".join(clean_q.split()[:3])
+        if short_q and short_q != clean_q:
+            queries.append(short_q)
 
-        # 1. Try Pexels Video Search
+        searches: List[Tuple[str, str, Callable[[str], Optional[str]]]] = []
         if prefer_video and self.config.pexels_api_key:
-            try:
-                vid = self._search_pexels_video(clean_q, target_width, target_height)
-                if vid:
-                    return vid, "video"
-            except Exception as e:
-                log.debug("Pexels video search fallback: %s", e)
-
-        # 2. Try Pixabay Video Search
+            searches.append(("Pexels video", "video",
+                             lambda q: self._search_pexels_video(q, target_width, target_height)))
         if prefer_video and self.config.pixabay_api_key:
-            try:
-                vid = self._search_pixabay_video(clean_q)
-                if vid:
-                    return vid, "video"
-            except Exception as e:
-                log.debug("Pixabay video search fallback: %s", e)
-
-        # 3. Try Pexels Photo Search
+            searches.append(("Pixabay video", "video",
+                             lambda q: self._search_pixabay_video(q, target_width, target_height)))
         if self.config.pexels_api_key:
-            try:
-                img = self._search_pexels_photo(clean_q, target_width, target_height)
-                if img:
-                    return img, "image"
-            except Exception as e:
-                log.debug("Pexels photo search fallback: %s", e)
+            searches.append(("Pexels photo", "image",
+                             lambda q: self._search_pexels_photo(q, target_width, target_height)))
+        if self.config.pixabay_api_key:
+            searches.append(("Pixabay photo", "image",
+                             lambda q: self._search_pixabay_photo(q, target_width, target_height)))
+
+        # 1-4. Stock video first (real motion), then stock photos
+        for query in queries:
+            for label, kind, search in searches:
+                try:
+                    found = search(query)
+                    if found:
+                        log.info("Visual for %r: %s", query, label)
+                        return found, kind
+                except Exception as e:
+                    log.debug("%s search fallback: %s", label, e)
 
         # 4. Try Wikimedia Commons Search
         try:
-            wiki_img = self._search_wikimedia(clean_q)
+            wiki_img = next(filter(None, (self._search_wikimedia(q, target_width, target_height)
+                                          for q in queries)), None)
             if wiki_img:
                 return wiki_img, "image"
         except Exception as e:
@@ -1571,37 +1741,65 @@ class MediaFetcher:
             params={"query": query, "per_page": 12, "orientation": orientation},
             headers=headers, timeout=10,
         )
-        if resp.status_code == 200:
+        if self._api_ok("Pexels", resp):
             data = resp.json()
             videos = data.get("videos", [])
             videos.sort(key=lambda v: f"pexels:{v.get('id')}" in self._recent_assets)
-            for v in videos:
+            for v in videos[:6]:
                 files = [f for f in v.get("video_files", [])
                          if f.get("link") and f.get("file_type", "video/mp4") == "video/mp4"]
                 files.sort(key=lambda f: self._framing_score(f, width, height))
-                for vf in files:
+                for vf in files[:2]:     # best rendition, one backup; then the next video
                     got = self._stock_asset("pexels", v.get("id", vf["link"]), vf["link"], ".mp4", 50_000)
                     if got:
                         return got
         return None
 
-    def _search_pixabay_video(self, query: str) -> Optional[str]:
+    def _search_pixabay_video(self, query: str, width: int = 1920, height: int = 1080) -> Optional[str]:
         import requests
         # Key goes in `params`, never hand-built into a URL string that can be
         # echoed into logs / exception messages.
         resp = requests.get(
             "https://pixabay.com/api/videos/",
-            params={"key": self.config.pixabay_api_key, "q": query, "per_page": 12},
+            params={"key": self.config.pixabay_api_key, "q": query[:100], "per_page": 20,
+                    "safesearch": "true"},
             timeout=10,
         )
-        if resp.status_code == 200:
+        if self._api_ok("Pixabay", resp):
+            ranked = []
+            for hit in resp.json().get("hits", []):
+                renditions = [r for r in (hit.get("videos") or {}).values()
+                              if isinstance(r, dict) and r.get("url")]
+                if renditions:
+                    best = min(renditions, key=lambda r: self._framing_score(r, width, height))
+                    ranked.append((f"pixabay:{hit.get('id')}" in self._recent_assets,
+                                   self._framing_score(best, width, height), hit, best))
+            # Pixabay has no orientation filter for video: rank by shape here.
+            ranked.sort(key=lambda item: item[:2])
+            for _, _, hit, chosen in ranked[:6]:
+                got = self._stock_asset("pixabay", hit.get("id", chosen["url"]), chosen["url"], ".mp4", 50_000)
+                if got:
+                    return got
+        return None
+
+    def _search_pixabay_photo(self, query: str, width: int, height: int) -> Optional[str]:
+        import requests
+        resp = requests.get(
+            "https://pixabay.com/api/",
+            params={"key": self.config.pixabay_api_key, "q": query[:100], "per_page": 20,
+                    "image_type": "photo", "safesearch": "true",
+                    "orientation": "vertical" if height > width else "horizontal"},
+            timeout=10,
+        )
+        if self._api_ok("Pixabay", resp):
             hits = resp.json().get("hits", [])
-            hits.sort(key=lambda v: f"pixabay:{v.get('id')}" in self._recent_assets)
-            for hit in hits:
-                vids = hit.get("videos", {})
-                chosen = vids.get("large") or vids.get("medium") or vids.get("small")
-                if chosen and chosen.get("url"):
-                    got = self._stock_asset("pixabay", hit.get("id", chosen["url"]), chosen["url"], ".mp4", 50_000)
+            hits.sort(key=lambda p: (f"pixabay_photo:{p.get('id')}" in self._recent_assets,
+                                     self._framing_score({"width": p.get("imageWidth"),
+                                                          "height": p.get("imageHeight")}, width, height)))
+            for photo in hits[:6]:
+                src = photo.get("largeImageURL") or photo.get("webformatURL")
+                if src:
+                    got = self._stock_asset("pixabay_photo", photo.get("id", src), src, ".jpg", 5_000)
                     if got:
                         return got
         return None
@@ -1615,11 +1813,11 @@ class MediaFetcher:
             params={"query": query, "per_page": 12, "orientation": orientation},
             headers=headers, timeout=10,
         )
-        if resp.status_code == 200:
+        if self._api_ok("Pexels", resp):
             photos = resp.json().get("photos", [])
             photos.sort(key=lambda p: (f"pexels_photo:{p.get('id')}" in self._recent_assets,
                                        self._framing_score(p, width, height)))
-            for photo in photos:
+            for photo in photos[:6]:
                 src = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("large")
                 if src:
                     got = self._stock_asset("pexels_photo", photo.get("id", src), src, ".jpg", 5_000)
@@ -1627,27 +1825,43 @@ class MediaFetcher:
                         return got
         return None
 
-    def _search_wikimedia(self, query: str) -> Optional[str]:
+    # Wikimedia asks API clients for a descriptive User-Agent with a way to
+    # find the project; generic agents are throttled (HTTP 429) much sooner.
+    WIKIMEDIA_UA = "VideoStudio/3.2 (https://github.com/Kamran5H/VideoStudio; desktop video maker)"
+
+    def _search_wikimedia(self, query: str, width: int = 1920, height: int = 1080) -> Optional[str]:
         import requests
-        url = "https://commons.wikimedia.org/w/api.php"
+        headers = {"User-Agent": self.WIKIMEDIA_UA}
         params = {
-            "action": "query", "generator": "search", "gsrsearch": f"{query} filetype:bitmap",
-            "gsrlimit": 3, "prop": "imageinfo", "iiprop": "url|mime", "format": "json"
+            "action": "query", "format": "json", "formatversion": 2,
+            "generator": "search", "gsrsearch": f"{query} filetype:bitmap",
+            "gsrnamespace": 6,                       # File: pages only
+            "gsrlimit": 10, "prop": "imageinfo", "iiprop": "url|mime|size",
+            # A scaled copy instead of the original, which can be a 50 MB scan.
+            "iiurlwidth": max(int(width), int(height), 1280),
         }
-        resp = requests.get(url, params=params, headers={"User-Agent": "VideoStudioPro/3.0"}, timeout=10)
-        if resp.status_code == 200:
-            pages = resp.json().get("query", {}).get("pages", {})
-            for p in pages.values():
-                info = p.get("imageinfo", [])
-                if info and "url" in info[0]:
-                    img_url = info[0]["url"]
-                    if img_url.lower().endswith((".jpg", ".jpeg", ".png")):
-                        ext = ".png" if img_url.lower().endswith(".png") else ".jpg"
-                        out = self.cache_dir / f"wiki_{uuid.uuid4().hex[:8]}{ext}"
-                        got = self._download(img_url, out, min_bytes=5_000,
-                                             headers={"User-Agent": "VideoStudioPro/3.0"})
-                        if got:
-                            return got
+        resp = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                            headers=headers, timeout=10)
+        if not self._api_ok("Wikimedia", resp):
+            return None
+        pages = resp.json().get("query", {}).get("pages", [])
+        if isinstance(pages, dict):                  # formatversion 1 shape
+            pages = list(pages.values())
+        candidates = []
+        for page in pages:
+            info = (page.get("imageinfo") or [{}])[0]
+            url = info.get("thumburl") or info.get("url")
+            if url and info.get("mime") in ("image/jpeg", "image/png"):
+                candidates.append((self._framing_score(info, width, height), url, info["mime"]))
+        candidates.sort(key=lambda c: c[0])
+        for _, url, mime in candidates[:4]:
+            ext = ".png" if mime == "image/png" else ".jpg"
+            out = self.cache_dir / f"wiki_{zlib.crc32(url.encode()):08x}{ext}"
+            if out.exists() and out.stat().st_size >= 5_000:
+                return str(out)
+            got = self._download(url, out, min_bytes=5_000, headers=headers)
+            if got:
+                return got
         return None
 
     @staticmethod
@@ -1913,6 +2127,10 @@ class AudioEngine:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.voice_cloner = VoiceCloner(config)
         self.voice_note = ""        # why the cloned voice was not used, if it was asked for
+        # Which voice this job's narration uses so far: "", "cloned" or
+        # "standard". One video never mixes the two (see generate_voiceover).
+        self.job_voice = ""
+        self.last_voice_cloned = False
 
     def generate_voiceover(
         self,
@@ -1934,16 +2152,34 @@ class AudioEngine:
         kept in ``self.voice_note``.
         """
         out = out_path or (self.temp_dir / f"vo_{uuid.uuid4().hex[:8]}.mp3")
-        if my_voice and text.strip():
+        self.last_voice_cloned = False
+        if my_voice and text.strip() and self.job_voice != "standard":
             try:
                 self.voice_cloner.synthesize(text, language, out)
                 if out.exists() and out.stat().st_size > 100:
+                    self.job_voice = "cloned"
+                    self.last_voice_cloned = True
                     return out, []
                 raise RuntimeError("the voice service returned no audio")
             except Exception as exc:
                 reason = str(exc)
-                if quota_wait_seconds(reason):
+                quota_wait = quota_wait_seconds(reason)
+                if quota_wait:
                     reason = "today's free GPU time is used up"
+                    out.unlink(missing_ok=True)
+                    if self.job_voice == "cloned":
+                        # Earlier scenes already speak in the cloned voice:
+                        # switching now would mix two voices in one video.
+                        # Wait for quota instead; finished scenes are kept.
+                        raise QuotaExhausted(
+                            max(quota_wait, 900),
+                            reason="Free GPU time for your voice is used up — finished scenes are kept",
+                        ) from exc
+                    # Nothing cloned yet: make the whole video with the
+                    # standard voice (the result card says so) instead of
+                    # failing a job only because the daily quota ran out.
+                    self.job_voice = "standard"
+                    strict_my_voice = False
                 self.voice_note = reason[:160]
                 if strict_my_voice:
                     out.unlink(missing_ok=True)
@@ -2908,6 +3144,14 @@ class JobQueue:
                     # Pipeline returned without a result: never leave it QUEUED,
                     # or the worker would spin on it forever.
                     self._fail(pending_job, "Pipeline finished without producing a video.")
+            except ColabRenderPending as pending:
+                # Our own render is still running on Colab: check back soon.
+                # Not a quota wait, so no back-off and no deferral count.
+                pending_job.stage = Stage.QUEUED
+                pending_job.not_before = time.time() + max(5, int(pending.wait_seconds))
+                pending_job.message = f"⏳ {pending.reason}"
+                pending_job.error = None
+                self._save(force=True)
             except QuotaExhausted as quota:
                 # Free-GPU quota / transient network — defer and auto-resume when
                 # the window replenishes. Finished chunks stay on disk, so the
@@ -2918,7 +3162,9 @@ class JobQueue:
                     self._fail(pending_job, f"Gave up after {cap} quota/network waits: {quota.reason}")
                     continue
                 pending_job.stage = Stage.QUEUED
-                pending_job.not_before = time.time() + max(30, int(quota.wait_seconds))
+                pending_job.not_before = time.time() + deferral_wait(
+                    quota.wait_seconds, pending_job.deferrals,
+                    int(getattr(self.studio.config, "quota_wait_cap_min", 45)) * 60)
                 at = time.strftime("%H:%M", time.localtime(pending_job.not_before))
                 pending_job.message = f"⏳ {quota.reason} — auto-retry at {at} (checkpoints saved)"
                 pending_job.error = None
@@ -3039,6 +3285,7 @@ class VideoStudio:
 
         log.info("Starting Job [%s] Mode: %s", sett.job_id, sett.mode)
         self.audio_engine.voice_note = ""
+        self.audio_engine.job_voice = ""
 
         if sett.mode == "script_story":
             self._execute_script_mode(sett, job_dir, final_video_out, progress_cb)
@@ -3235,7 +3482,7 @@ class VideoStudio:
             elif not success and (quota_hint or transient):
                 raise QuotaExhausted(
                     min(quota_hint or 300, self.config.quota_wait_cap_min * 60),
-                    reason="Free GPU quota busy" if quota_hint else "Network unavailable",
+                    reason="Free cloud GPU time is used up for now" if quota_hint else "Network unavailable",
                 )
 
             if not success:
@@ -3444,6 +3691,8 @@ class VideoStudio:
                 checkpoint = self._read_scene_checkpoint(metadata_path)
                 if checkpoint is not None:
                     events, vo_dur = checkpoint
+                    if sett.use_my_voice and self._scene_voice(metadata_path) == "cloned":
+                        self.audio_engine.job_voice = "cloned"   # keep one voice after a resume
                     log.info("Checkpoint: Reusing rendered scene %s for job %s", scene_video.name, sett.job_id)
                     scene_clips.append(scene_video)
                     vo_files.append(vo_path)
@@ -3522,6 +3771,7 @@ class VideoStudio:
                 metadata_path,
                 events,
                 vo_dur,
+                voice="cloned" if self.audio_engine.last_voice_cloned else "standard",
             )
             scene_clips.append(scene_video)
 
@@ -3618,9 +3868,19 @@ class VideoStudio:
             return None
 
     @staticmethod
-    def _write_scene_checkpoint(path: Path, events: List[dict], voiceover_duration: float) -> None:
+    def _scene_voice(path: Path) -> str:
+        """'cloned' or 'standard' for a rendered scene ('' if unknown)."""
+        try:
+            value = json.loads(path.read_text(encoding="utf-8")).get("voice", "")
+        except (OSError, ValueError, AttributeError):
+            return ""
+        return value if value in ("cloned", "standard") else ""
+
+    @staticmethod
+    def _write_scene_checkpoint(path: Path, events: List[dict], voiceover_duration: float,
+                                voice: str = "standard") -> None:
         payload = json.dumps(
-            {"events": events, "voiceover_duration": voiceover_duration},
+            {"events": events, "voiceover_duration": voiceover_duration, "voice": voice},
             ensure_ascii=False,
         )
         temp_path = path.with_suffix(path.suffix + ".tmp")
