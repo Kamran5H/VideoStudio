@@ -1082,6 +1082,8 @@ class GenerationBackend:
 class ColabBackend(GenerationBackend):
     name = "colab"
     description = "Free Google Colab T4 GPU Worker (Wan2.1)"
+    # Free T4 renders for 89-frame 30-step chunks + CPU UMT5 encoding can run past 15m.
+    PREDICT_TIMEOUT = 1800
 
     def __init__(self, config: StudioConfig):
         self.config = config

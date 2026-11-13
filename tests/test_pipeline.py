@@ -379,6 +379,131 @@ class BackendTimeoutTests(unittest.TestCase):
         with patch("requests.get", side_effect=requests.ConnectionError("down")):
             self.assertEqual(be.check_connection(), (False, "unreachable (ConnectionError)"))
 
+        self.assertGreaterEqual(vs.ColabBackend.PREDICT_TIMEOUT, 1800)
+
+    def test_colab_worker_notebook_and_t4_sdpa_fallback(self):
+        import ast
+        import sys
+        import types
+
+        nb_path = Path(__file__).resolve().parent.parent / "colab_worker.ipynb"
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        sources = ["".join(c.get("source", [])) for c in nb["cells"] if c.get("cell_type") == "code"]
+        joined = "\n".join(sources)
+        self.assertIn("show_error=True", joined)
+        self.assertIn("PYTORCH_CUDA_ALLOC_CONF", joined)
+        for src in sources:
+            cleaned = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith(("%", "!")))
+            ast.parse(cleaned)
+
+        # Compile only the SDPA fallback setup block (up to CKPT_DIR) against stub torch/wan
+        # to verify SM 7.5 (T4) bfloat16 -> float16 casting and chunked fallback offline.
+        cell4 = next(s for s in sources if "def _sdpa_fallback" in s)
+        head = cell4.split("CKPT_DIR =")[0]
+        calls = []
+        fail_first = [False]
+
+        class FakeTensor:
+            def __init__(self, shape, dtype="bf16", is_cuda=True):
+                self.shape = tuple(shape)
+                self.dtype = dtype
+                self.is_cuda = is_cuda
+                self.device = "cuda:0"
+                self.last_cast = None
+
+            def size(self, dim):
+                return self.shape[dim]
+
+            def type(self, dt):
+                return FakeTensor(self.shape, dt, self.is_cuda)
+
+            def __getitem__(self, item):
+                if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], slice):
+                    start, stop, _ = item[1].indices(self.shape[1])
+                    return FakeTensor((self.shape[0], max(0, stop - start), *self.shape[2:]), self.dtype, self.is_cuda)
+                return self
+
+        class FakeLens:
+            def __init__(self, vals):
+                self._vals = list(vals)
+
+            def numel(self):
+                return len(self._vals)
+
+            def __getitem__(self, idx):
+                return self._vals[idx]
+
+        class FakeSDP:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *args):
+                return False
+
+        fake_attn = types.ModuleType("wan.modules.attention")
+        fake_attn.FLASH_ATTN_2_AVAILABLE = False
+        fake_attn.FLASH_ATTN_3_AVAILABLE = False
+
+        def fake_attention(q, k, v, **kwargs):
+            calls.append((q.shape, dict(kwargs)))
+            if fail_first[0]:
+                fail_first[0] = False
+                raise RuntimeError("No available kernel")
+            return FakeTensor(q.shape, kwargs["dtype"], q.is_cuda)
+
+        fake_attn.attention = fake_attention
+        fake_model = types.ModuleType("wan.modules.model")
+        fake_wan = types.ModuleType("wan")
+        fake_wan_cfg = types.ModuleType("wan.configs")
+        fake_wan_cfg.WAN_CONFIGS = {}
+        fake_modules = types.ModuleType("wan.modules")
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.bfloat16 = "bf16"
+        fake_torch.float16 = "fp16"
+        fake_torch.cat = lambda seq, dim=0: FakeTensor(
+            (seq[0].shape[0], sum(t.shape[1] for t in seq), *seq[0].shape[2:]),
+            seq[0].dtype,
+            seq[0].is_cuda,
+        )
+        fake_torch.cuda = types.SimpleNamespace(get_device_capability=lambda dev: (7, 5))
+        fake_torch.nn = types.ModuleType("torch.nn")
+        fake_torch_attn = types.ModuleType("torch.nn.attention")
+        fake_torch_attn.SDPBackend = types.SimpleNamespace(FLASH_ATTENTION=1, EFFICIENT_ATTENTION=2)
+        fake_torch_attn.sdpa_kernel = lambda backends: FakeSDP()
+        fake_torch.nn.attention = fake_torch_attn
+
+        stubs = {
+            "torch": fake_torch,
+            "torch.nn": fake_torch.nn,
+            "torch.nn.attention": fake_torch_attn,
+            "wan": fake_wan,
+            "wan.modules": fake_modules,
+            "wan.modules.attention": fake_attn,
+            "wan.modules.model": fake_model,
+            "wan.configs": fake_wan_cfg,
+        }
+        orig_sys_path = list(sys.path)
+        try:
+            with patch.dict(sys.modules, stubs):
+                exec(compile(head, "<colab_cell4>", "exec"), {})
+            q = FakeTensor((1, 35880, 12, 128), "bf16")
+            out = fake_attn.flash_attention(q, q, q, k_lens=FakeLens([35880]), q_lens=FakeLens([35880]))
+            self.assertEqual(out.dtype, "bf16")
+            self.assertEqual(out.shape, (1, 35880, 12, 128))
+            self.assertEqual(calls[0][1]["dtype"], "fp16")
+            self.assertIsNone(calls[0][1]["k_lens"])
+            self.assertIsNone(calls[0][1]["q_lens"])
+
+            calls.clear()
+            fail_first[0] = True
+            q2 = FakeTensor((1, 2500, 12, 128), "bf16")
+            out2 = fake_attn.flash_attention(q2, q2, q2)
+            self.assertEqual(out2.shape, (1, 2500, 12, 128))
+            self.assertGreater(len(calls), 1)
+        finally:
+            sys.path[:] = orig_sys_path
+
     def test_free_text_reply_validation(self):
         self.assertTrue(vs.looks_like_prompt("A slow aerial shot over misty mountains at dawn."))
         for bad in ("", "short", "<html>502 Bad Gateway</html>" * 3, '{"error": "rate limited"}',
