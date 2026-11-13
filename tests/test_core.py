@@ -13,14 +13,17 @@ os.environ.setdefault("VIDEOSTUDIO_OUTPUT_DIR", tempfile.mkdtemp(prefix="vs_test
 import app  # noqa: E402
 from app import readable_job_message, render_job_card, sync_job_outputs  # noqa: E402
 from video_studio import (  # noqa: E402
+    ColabBackend,
     JobQueue,
     JobSettings,
     JobStatus,
     PromptEngine,
     Stage,
+    StudioConfig,
     SubtitleEngine,
     VideoStudio,
     frames_for,
+    run_supervised,
 )
 
 
@@ -462,6 +465,63 @@ class VideoStudioCoreTests(unittest.TestCase):
                 json.loads(queue.queue_file.read_text(encoding="utf-8"))["saved"]["message"],
                 "second snapshot",
             )
+
+    def test_run_supervised_recovers_crash_and_stops_on_clean_or_loop_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "queue" / "worker.lock"
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            spawns = []
+
+            class FakeProc:
+                def __init__(self, pid, rc):
+                    self.pid = pid
+                    self._rc = rc
+
+                def wait(self, timeout=None):
+                    return self._rc
+
+                def terminate(self):
+                    pass
+
+            def popen_recover(cmd, env):
+                spawns.append((cmd, env.get("VS_MANAGED_LAUNCH")))
+                if len(spawns) == 1:
+                    lock.write_text("4242", encoding="utf-8")
+                    return FakeProc(4242, 1)
+                return FakeProc(4243, 0)
+
+            with patch("video_studio.DEFAULT_OUTPUT_DIR", Path(tmp)):
+                rc = run_supervised(Path(tmp) / "app.py", popen_fn=popen_recover, sleep_fn=lambda _: None)
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(spawns), 2)
+            self.assertEqual(spawns[1][1], "1")
+            self.assertFalse(lock.exists())
+
+            rapid = []
+
+            def popen_crash_loop(cmd, env):
+                rapid.append(cmd)
+                return FakeProc(9000 + len(rapid), 1)
+
+            with patch("video_studio.DEFAULT_OUTPUT_DIR", Path(tmp)):
+                rc2 = run_supervised(Path(tmp) / "app.py", popen_fn=popen_crash_loop, sleep_fn=lambda _: None)
+            self.assertEqual(rc2, 1)
+            self.assertEqual(len(rapid), 5)
+
+    def test_colab_reset_client_closes_active_client_and_build_app_succeeds(self):
+        be = ColabBackend(StudioConfig(colab_url="https://demo.gradio.live"))
+        closed = []
+
+        class FakeClient:
+            def close(self):
+                closed.append(True)
+
+        be._client = FakeClient()
+        be._client_url = "https://demo.gradio.live"
+        be.reset_client()
+        self.assertEqual(closed, [True])
+        self.assertIsNone(be._client)
+        self.assertIsNotNone(app.build_app())
 
 
 if __name__ == "__main__":

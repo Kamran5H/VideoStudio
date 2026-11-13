@@ -1097,8 +1097,14 @@ class ColabBackend(GenerationBackend):
         return bool(self._normalized_url())
 
     def reset_client(self) -> None:
+        client = self._client
         self._client = None
         self._client_url = ""
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def _get_client(self) -> Any:
         from gradio_client import Client
@@ -2828,10 +2834,12 @@ class JobQueue:
         return True
 
     def get_status(self, job_id: str) -> Optional[JobStatus]:
-        return self._jobs.get(job_id)
+        with self._lock:
+            return self._jobs.get(job_id)
 
     def all_jobs(self) -> List[JobStatus]:
-        return list(self._jobs.values())
+        with self._lock:
+            return list(self._jobs.values())
 
     def _ensure_worker(self):
         # Only the lock-owning instance runs the worker thread.
@@ -3648,10 +3656,58 @@ class VideoStudio:
 # Main Execution Entrypoint
 # ----------------------------------------------------------------------------
 
+def run_supervised(
+    app_script: Optional[Path] = None,
+    popen_fn: Any = subprocess.Popen,
+    sleep_fn: Any = time.sleep,
+) -> int:
+    """Run app.py under a self-healing restart loop for unexpected exits.
+
+    Exit code 0 (or Ctrl+C interrupt codes) stops cleanly so the Settings
+    'Turn off VideoStudio' button keeps the server off. Any unexpected exit
+    restarts automatically after cleaning a stale lock from the dead child.
+    """
+    target = str(app_script or (STUDIO_ROOT / "app.py"))
+    cmd = [sys.executable, "-u", target]
+    env = os.environ.copy()
+    lock_path = DEFAULT_OUTPUT_DIR / "queue" / "worker.lock"
+    rapid_failures = 0
+    while True:
+        started = time.monotonic()
+        proc = popen_fn(cmd, env=env)
+        try:
+            rc = int(proc.wait())
+        except KeyboardInterrupt:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            return 0
+        if rc in (0, -2, 130, 3221225786):
+            return 0
+        try:
+            if lock_path.exists() and lock_path.read_text().strip() == str(proc.pid):
+                lock_path.unlink()
+        except OSError:
+            pass
+        uptime = time.monotonic() - started
+        rapid_failures = 0 if uptime >= 30.0 else rapid_failures + 1
+        if rapid_failures >= 5:
+            log.error("VideoStudio exited %d times within 30s (last code %s); stopping watchdog.",
+                      rapid_failures, rc)
+            return rc or 1
+        env["VS_MANAGED_LAUNCH"] = "1"
+        log.warning("VideoStudio server exited unexpectedly (code %s after %.1fs); restarting in 2s...",
+                    rc, uptime)
+        sleep_fn(2.0)
+
+
 def main():
     parser = argparse.ArgumentParser(description="VideoStudio Pro — Unified AI Video Creation Studio")
     parser.add_argument("--web", action="store_true", help="Launch Gradio Web Studio")
     parser.add_argument("--probe", action="store_true", help="Run hardware diagnostics probe")
+    parser.add_argument("--watch", action="store_true", help="Run app.py with automatic crash recovery")
     args = parser.parse_args()
 
     if args.probe:
@@ -3667,6 +3723,9 @@ def main():
         print(f"Colab Worker: {'OK' if ok else 'OFFLINE'} ({colab_status})")
         print("=" * 60 + "\n")
         return
+
+    if args.watch:
+        raise SystemExit(run_supervised())
 
     # Web path: app.py creates its own single VideoStudio at import time.
     # Do NOT build one here too, or the worker lock would make app's studio

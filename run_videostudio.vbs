@@ -52,7 +52,7 @@ If Not fso.FolderExists(appDir & "\outputs\logs") Then fso.CreateFolder(appDir &
 
 WshShell.Environment("PROCESS")("VS_MANAGED_LAUNCH") = "1"
 
-cmdLine = "cmd /c " & q & q & py & q & " app.py > " & q & logPath & q & " 2>&1" & q
+cmdLine = "cmd /c " & q & q & py & q & " -u video_studio.py --watch > " & q & logPath & q & " 2>&1" & q
 WshShell.Run cmdLine, 0, False
 
 For i = 1 To 120        ' up to 60s

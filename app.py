@@ -1202,7 +1202,10 @@ def build_app() -> gr.Blocks:
                     save_settings, [cfg_colab, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini],
                     [save_msg, cfg_hf, cfg_pexels, cfg_pixabay, cfg_gemini, backend_box],
                 )
-                check_conn_btn.click(check_backends_status, None, backend_box)
+                check_conn_btn.click(
+                    check_backends_status, None, backend_box,
+                    concurrency_id="status_check", concurrency_limit=1,
+                )
                 off_btn.click(turn_off, None, off_msg)
 
         home_story.click(lambda: gr.Tabs(selected="story"), outputs=workspaces)
@@ -1214,14 +1217,16 @@ def build_app() -> gr.Blocks:
                 "<a href='https://github.com/Kamran5H/VideoStudio' target='_blank'>GitHub</a></div>")
 
         # Reconnect to running/finished jobs after a refresh, then keep in sync.
+        # Keep fast status polling unqueued so slow backend checks or tab switches
+        # never stall Gradio's queue or drop the UI connection.
         sync_outputs = [clip_card, clip_video, clip_job_id, story_card, story_video, story_job_id,
                         last_clip_video, last_story_video, clip_stop, clip_retry, story_stop, story_retry,
                         clip_files, story_files]
         sync_inputs = [last_clip_video, last_story_video]
-        app.load(sync_job_outputs, sync_inputs, sync_outputs)
-        gr.Timer(2.0).tick(sync_job_outputs, sync_inputs, sync_outputs, show_progress="hidden")
-        app.load(read_system_logs, None, log_box)
-        app.load(check_backends_status, None, backend_box)
+        app.load(sync_job_outputs, sync_inputs, sync_outputs, queue=False)
+        gr.Timer(2.0).tick(sync_job_outputs, sync_inputs, sync_outputs, show_progress="hidden", queue=False)
+        app.load(read_system_logs, None, log_box, queue=False)
+        app.load(check_backends_status, None, backend_box, concurrency_id="status_check", concurrency_limit=1)
 
     return app
 
