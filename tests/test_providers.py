@@ -253,13 +253,14 @@ class ColabPendingTests(unittest.TestCase):
         be = vs.ColabBackend(vs.StudioConfig(colab_url="https://x.gradio.live"))
         req = vs.GenerationRequest(prompt="lions", width=480, height=832, steps=30, seed=4)
         messages = []
-        with patch.object(be, "_get_client", return_value=client):
+        with patch.object(be, "_get_client", return_value=client), \
+                patch.object(be, "check_connection", return_value=(True, "connected")):
             with self.assertRaises(vs.ColabRenderPending) as first:
                 be.generate(req, tmp / "out.mp4", messages.append)
             self.assertIn("yours is next", first.exception.reason)
             with self.assertRaises(vs.ColabRenderPending) as second:
                 be.generate(req, tmp / "out.mp4", messages.append)
-            self.assertEqual(second.exception.reason, "Colab: rendering, step 7/20")
+            self.assertEqual(second.exception.reason, "Colab: rendering, step 7/20 · 0 min so far")
             out = be.generate(req, tmp / "out.mp4", messages.append)
         self.assertEqual(out.read_bytes(), b"video")
         self.assertEqual(len(submits), 1)                 # never re-sent while pending
@@ -271,6 +272,103 @@ class ColabPendingTests(unittest.TestCase):
                          "Colab worker: finishing an earlier render; 2 more request(s) before yours")
         self.assertEqual(describe(_status("PROCESSING"))[1], "Colab worker: rendering...")
         self.assertEqual(describe(None), (None, ""))
+
+
+class ColabWatchdogTests(unittest.TestCase):
+    """From the user: the bar sat at 33% for a long time on a Colab clip."""
+
+    def _backend(self, job, live=True):
+        be = vs.ColabBackend(vs.StudioConfig(colab_url="https://x.gradio.live"))
+        be._client = types.SimpleNamespace(submit=lambda *a, **k: job)
+        self.live = live
+        return be
+
+    def _poll(self, be, req, out, n=1):
+        with patch.object(be, "_get_client", return_value=be._client), \
+                patch.object(be, "check_connection", side_effect=lambda timeout=0: (self.live, "unreachable")):
+            for _ in range(n):
+                try:
+                    be.generate(req, out)
+                except vs.ColabRenderPending:
+                    pass
+
+    def test_a_dead_worker_is_detected_at_the_second_check_not_after_an_hour(self):
+        job = PendingJob([_status("PROCESSING")], finish_after=10_000)
+        be = self._backend(job)
+        req = vs.GenerationRequest(prompt="p", seed=1)
+        self._poll(be, req, Path("o.mp4"))                        # healthy
+        self.live = False
+        self._poll(be, req, Path("o.mp4"))                        # one failed check: keep waiting
+        self.assertIsNotNone(be._pending)
+        with self.assertRaisesRegex(RuntimeError, "Colab worker is offline") as ctx:
+            self._poll(be, req, Path("o.mp4"))
+        self.assertIsNone(be._pending)
+        self.assertTrue(vs.is_transient_error(str(ctx.exception)))
+
+    def test_a_worker_that_vanishes_mid_render_gets_a_clear_message(self):
+        import concurrent.futures
+
+        class Vanished:
+            def result(self, timeout=None):
+                raise concurrent.futures.CancelledError()
+
+            def done(self):
+                return True
+
+        be = self._backend(Vanished(), live=False)
+        with self.assertRaisesRegex(RuntimeError, "Colab session has probably ended") as ctx:
+            self._poll(be, vs.GenerationRequest(prompt="p", seed=1), Path("o.mp4"))
+        self.assertTrue(vs.is_transient_error(str(ctx.exception)))
+        self.assertIsNone(be._pending)
+
+    def test_a_render_that_stops_stepping_is_abandoned(self):
+        job = PendingJob([_status("PROGRESS", 5, length=20)], finish_after=10_000)
+        be = self._backend(job)
+        req = vs.GenerationRequest(prompt="p", seed=1)
+        clock = [1000.0]
+        with patch.object(vs.time, "monotonic", lambda: clock[0]):
+            self._poll(be, req, Path("o.mp4"))
+            clock[0] += vs.ColabBackend.STALL_SECONDS - 60
+            self._poll(be, req, Path("o.mp4"))                    # slow, but under the limit
+            self.assertIsNotNone(be._pending)
+            clock[0] += 120
+            with self.assertRaisesRegex(TimeoutError, "no new step"):
+                self._poll(be, req, Path("o.mp4"))
+
+    def test_a_slow_worker_without_step_reports_is_not_called_stuck(self):
+        job = PendingJob([_status("PROCESSING")], finish_after=10_000)
+        be = self._backend(job)
+        req = vs.GenerationRequest(prompt="p", seed=1)
+        clock = [1000.0]
+        with patch.object(vs.time, "monotonic", lambda: clock[0]):
+            self._poll(be, req, Path("o.mp4"))
+            clock[0] += vs.ColabBackend.STALL_SECONDS + 600
+            with patch.object(be, "check_connection", return_value=(True, "connected")):
+                with self.assertRaises(vs.ColabRenderPending) as ctx:
+                    be.generate(req, Path("o.mp4"))
+        self.assertIn("older notebook without step progress", ctx.exception.reason)
+        self.assertIn("30 min so far", ctx.exception.reason)
+
+
+class ProgressBarTests(unittest.TestCase):
+    def test_bar_never_moves_backwards_on_a_check_back(self):
+        queue = object.__new__(vs.JobQueue)
+        job = vs.JobStatus(job_id="b1", settings=vs.JobSettings(job_id="b1"))
+        queue._jobs, queue._cancelled_jobs = {"b1": job}, set()
+        queue._save = lambda force=False: None
+        queue._progress_callback("b1", vs.Stage.GENERATING, 0.333, "Clip 2/3: trying Colab")
+        queue._progress_callback("b1", vs.Stage.GENERATING, 0.20, "Clip 1/3 reused")
+        self.assertAlmostEqual(job.progress, 0.333)
+        self.assertGreater(job.last_seen, 0)
+
+    def test_card_says_when_the_job_last_reported(self):
+        import app
+
+        card = app.render_job_card("j", "x", vs.Stage.QUEUED, 0.33, "⏳ Colab: rendering, step 3/20 · 4 min so far",
+                                   elapsed=300, wait_kind="colab", last_seen=vs.time.time() - 75)
+        self.assertIn("updated 1m 15s ago", card)
+        done = app.render_job_card("j", "x", vs.Stage.DONE, 1.0, "Done", last_seen=vs.time.time() - 75)
+        self.assertNotIn("updated", done)
 
 
 class PendingDeferralTests(unittest.TestCase):

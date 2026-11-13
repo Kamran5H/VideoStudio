@@ -1149,12 +1149,19 @@ class ColabBackend(GenerationBackend):
     # Poll in short intervals while retaining the remote request across queue deferrals.
     PREDICT_TIMEOUT = 120
     MAX_PENDING_SECONDS = 3600
+    # A worker that has reported render steps but shows no new step for this
+    # long is stuck (or its Colab session froze): give up on that request.
+    STALL_SECONDS = 20 * 60
+    # Consecutive failed health checks before a pending render is abandoned
+    # because the worker is gone (Colab session ended, link expired).
+    OFFLINE_CHECKS = 2
 
     def __init__(self, config: StudioConfig):
         self.config = config
         self._client: Any = None
         self._client_url = ""
         self._pending: tuple[Any, Any, float] | None = None
+        self._watch: Dict[str, Any] = {}
 
     def _normalized_url(self) -> str:
         return self.config.colab_url.strip().rstrip("/")
@@ -1206,6 +1213,54 @@ class ColabBackend(GenerationBackend):
             return (False, "connected, but /generate endpoint is missing")
         return (True, "connected")
 
+    def _abandon(self, error: Exception) -> None:
+        """Forget the pending request and the connection, then raise `error`."""
+        self._pending = None
+        self.reset_client()
+        raise error
+
+    def _check_pending(self, job: Any, started: float, progress: Callable[[str], None]) -> None:
+        """Called at every check-back on a pending render: report its status,
+        and give up early when the worker is gone or has stopped stepping
+        (instead of waiting the full MAX_PENDING_SECONDS)."""
+        watch = self._watch or {"sig": None, "changed": started, "steps": False, "offline": 0}
+        self._watch = watch
+        try:
+            status = job.status()
+        except Exception:
+            status = None
+        sig, msg = self._describe_status(status)
+        now = time.monotonic()
+        if sig != watch["sig"]:
+            watch["sig"], watch["changed"] = sig, now
+            if msg:
+                progress(msg)
+        if "step" in msg:
+            watch["steps"] = True
+        live, detail = self.check_connection(timeout=10.0)
+        watch["offline"] = 0 if live else watch["offline"] + 1
+        if watch["offline"] >= self.OFFLINE_CHECKS:
+            self._abandon(RuntimeError(
+                f"Colab worker is offline ({detail}). Its Colab session has probably ended: run "
+                "colab_worker.ipynb again and paste the new link in Settings (connection lost)."))
+        rendering = isinstance(sig, tuple) and sig and sig[0] not in ("IN_QUEUE", "JOINING_QUEUE")
+        if rendering and watch["steps"] and now - watch["changed"] > self.STALL_SECONDS:
+            self._abandon(TimeoutError(
+                f"Colab render showed no new step for {int(self.STALL_SECONDS // 60)} min (timed out); "
+                "the Colab session may have frozen"))
+
+    def _pending_reason(self, job: Any, started: float) -> str:
+        """Card text for a render in progress, e.g. 'Colab: rendering, step 7/20 · 12 min so far'."""
+        try:
+            _, msg = self._describe_status(job.status())
+        except Exception:
+            msg = ""
+        minutes = int((time.monotonic() - started) // 60)
+        text = msg.replace("Colab worker: ", "Colab: ") if msg else "Colab: rendering this clip"
+        if msg.endswith("rendering...") and not (self._watch or {}).get("steps") and minutes >= 3:
+            text += " (preparing the model, or an older notebook without step progress)"
+        return f"{text} · {minutes} min so far"
+
     @staticmethod
     def _describe_status(status: Any) -> Tuple[Any, str]:
         """(change signature, message) for a gradio_client status update."""
@@ -1253,6 +1308,7 @@ class ColabBackend(GenerationBackend):
                 client = self._get_client()
                 progress(f"Colab worker: generating {w}x{h}, {req.num_frames} frames, {steps} steps...")
                 self._pending = (key, client.submit(*args, api_name="/generate"), time.monotonic())
+                self._watch = {"sig": None, "changed": time.monotonic(), "steps": False, "offline": 0}
             except Exception:
                 # A dead or expired worker URL: drop the broken connection so
                 # the next attempt (or a new URL) starts fresh.
@@ -1264,19 +1320,22 @@ class ColabBackend(GenerationBackend):
             result = job.result(timeout=min(self.PREDICT_TIMEOUT, remaining))
         except (TimeoutError, concurrent.futures.TimeoutError) as exc:
             if not job.done() and time.monotonic() - started < self.MAX_PENDING_SECONDS:
-                try:
-                    _, msg = self._describe_status(job.status())
-                except Exception:
-                    msg = ""
-                if msg:
-                    progress(msg)
-                reason = msg.replace("Colab worker: ", "Colab: ") if msg else "Colab is still rendering this clip"
-                raise ColabRenderPending(15, reason=reason) from exc
+                self._check_pending(job, started, progress)
+                raise ColabRenderPending(15, reason=self._pending_reason(job, started)) from exc
             self._pending = None
-            raise TimeoutError("Colab render timed out") from exc
-        except Exception:
+            raise TimeoutError("Colab render timed out after "
+                               f"{int(self.MAX_PENDING_SECONDS // 60)} min") from exc
+        except Exception as exc:
             self._pending = None
             self.reset_client()
+            if isinstance(exc, concurrent.futures.CancelledError) or not str(exc).strip():
+                # The worker vanished mid-render (Colab session ended or was
+                # terminated): gradio_client reports that as a bare cancel.
+                live, detail = self.check_connection(timeout=10.0)
+                where = f"is offline ({detail}); its Colab session has probably ended" if not live \
+                    else "dropped the request"
+                raise RuntimeError(f"Colab worker {where}. Run colab_worker.ipynb again and paste the "
+                                   "new link in Settings (connection lost).") from exc
             raise
         self._pending = None
         v_path = self._extract_video(result)
@@ -2822,6 +2881,7 @@ class JobStatus:
     # "stage": Stage value, "text": str}; newest last, capped.
     activity: List[dict] = field(default_factory=list)
     wait_kind: str = ""                        # why a QUEUED job waits: colab|quota|retry|""
+    last_seen: float = 0.0                     # last time the worker reported on this job
 
 
 ACTIVITY_LIMIT = 200
@@ -3247,6 +3307,7 @@ class JobQueue:
                 # Not a quota wait, so no back-off and no deferral count.
                 pending_job.stage = Stage.QUEUED
                 pending_job.wait_kind = "colab"
+                pending_job.last_seen = time.time()
                 pending_job.not_before = time.time() + max(5, int(pending.wait_seconds))
                 pending_job.message = f"⏳ {pending.reason}"
                 pending_job.error = None
@@ -3267,6 +3328,7 @@ class JobQueue:
                 at = time.strftime("%H:%M", time.localtime(pending_job.not_before))
                 pending_job.message = f"⏳ {quota.reason} — auto-retry at {at} (checkpoints saved)"
                 pending_job.wait_kind = "quota"
+                pending_job.last_seen = time.time()
                 add_activity(pending_job, f"{quota.reason}. Waiting; trying again at {at} "
                                           f"(wait {pending_job.deferrals} of {cap}, finished parts are kept)", "warn")
                 pending_job.error = None
@@ -3317,7 +3379,10 @@ class JobQueue:
         if js:
             stage_changed = js.stage != stage
             js.stage = stage
-            js.progress = progress
+            js.last_seen = time.time()
+            # Never move the bar backwards: a check-back re-runs the cheap early
+            # steps from their checkpoints, which used to drop it to 10%.
+            js.progress = progress if stage == Stage.DONE else max(js.progress, progress)
             js.message = msg
             add_activity(js, msg, "done" if stage == Stage.DONE else "info", stage)
             for k, v in kwargs.items():
@@ -3457,8 +3522,9 @@ class VideoStudio:
             return
 
         # 1. Prompt Enhancement
-        progress_cb(sett.job_id, Stage.ENHANCING, 0.10, "Enhancing prompt with cinematic AI...")
         plan_path = job_dir / "generation_plan.json"
+        if not plan_path.exists():       # a Colab check-back or resume reuses the saved plan silently
+            progress_cb(sett.job_id, Stage.ENHANCING, 0.10, "Enhancing prompt with cinematic AI...")
         try:
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             enhanced_prompt = plan["enhanced_prompt"]
@@ -3537,6 +3603,9 @@ class VideoStudio:
             )
 
             success = False
+            colab = self.backends.get("colab")
+            colab_hint = ("" if colab is not None and colab.available()
+                          else "; your Colab worker is not connected (Settings → Colab worker URL)")
             quota_hint = 0
             transient = False
             needs_token = False
@@ -3575,6 +3644,8 @@ class VideoStudio:
                     log.warning("Backend %s quota-limited: %s", b_name, q)
                 except Exception as e:
                     msg = str(e)
+                    if b_name == "colab":
+                        colab_hint = "; your Colab worker did not respond (see Live activity)"
                     # NOTE: must not reuse `w` here — it holds the clip width
                     # for the next chunk's GenerationRequest.
                     wait_s = quota_wait_seconds(msg)
@@ -3602,7 +3673,8 @@ class VideoStudio:
             elif not success and (quota_hint or transient):
                 raise QuotaExhausted(
                     min(quota_hint or 300, self.config.quota_wait_cap_min * 60),
-                    reason="Free cloud GPU time is used up for now" if quota_hint else "Network unavailable",
+                    reason=("Free cloud GPU time is used up for now" if quota_hint else "Network unavailable")
+                    + colab_hint,
                 )
 
             if not success:

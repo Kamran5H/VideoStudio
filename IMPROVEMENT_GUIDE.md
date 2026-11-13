@@ -124,3 +124,9 @@ The story screen shows the topic, shape and make button. The script editor and s
 - Each result card has a real progress bar. The percentage is the job's position in the pipeline and moves when a step finishes, or when the Colab worker reports a render step. A paused job (Colab check-back, quota wait, retry) shows an amber bar with the reason.
 - **📡 Live activity** under the card shows a step checklist (✓ done, ● now with "Clip 2/3 · step 7/20", ○ next, ✗ where it stopped) and a time-stamped timeline, newest first. The timeline lists every progress message and every info, warning or error line the job writes to the log: backends tried, quota limits, Colab steps, visuals found, voice fallbacks, retries, failures.
 - Activity is saved with the job (last 200 lines), so it is still there after a refresh or restart. Repeated lines from Colab check-backs are merged.
+
+### A bar that looked stuck at 33%
+- **Dead worker:** a Colab render whose worker had gone (session ended or terminated) was waited on for up to an hour. Every check-back now also checks the worker is reachable. Two failed checks, or a request the worker drops, end the wait at once with "Colab worker is offline … run colab_worker.ipynb again and paste the new link". The job then retries instead of failing.
+- **Frozen render:** a render that has reported steps but shows no new one for 20 minutes is abandoned. A worker that never reports steps (an older notebook) is not treated as stuck. Its card says so and shows the minutes so far.
+- **Card details:** the card shows "updated X ago" and, during a Colab render, "step 7/20 · 12 min so far". The bar no longer drops back to 10% on each check-back.
+- **Quota pauses:** a pause for free GPU quota now says whether your Colab worker is not connected or did not respond.
