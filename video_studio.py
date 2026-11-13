@@ -337,6 +337,14 @@ class HardwareProbe:
 # 2. Configuration Layer
 # ----------------------------------------------------------------------------
 
+def clean_secret(value: Any) -> str:
+    """A key/URL as the provider expects it: no surrounding whitespace or quotes."""
+    text = value.strip() if isinstance(value, str) else ""
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
+
 @dataclass
 class StudioConfig:
     """Master configuration for the entire unified VideoStudio suite.
@@ -364,6 +372,12 @@ class StudioConfig:
     max_videos_kept: int = 60                 # prune older finished videos on start
 
     def __post_init__(self):
+        # Keys pasted from a web page or a .env line often carry spaces or
+        # quotes ("abc123" / 'abc123'); providers then answer 401 and the key
+        # looks broken. Clean every key and the worker URL first.
+        for name in ("hf_token", "pexels_api_key", "pixabay_api_key", "gemini_api_key"):
+            setattr(self, name, clean_secret(getattr(self, name)))
+        self.colab_url = clean_secret(self.colab_url).rstrip("/")
         # Auto-load API keys from environment if empty
         if not self.hf_token:
             self.hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_TOKEN", "")
@@ -373,6 +387,8 @@ class StudioConfig:
             self.pixabay_api_key = os.environ.get("PIXABAY_API_KEY", "")
         if not self.gemini_api_key:
             self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
+        for name in ("hf_token", "pexels_api_key", "pixabay_api_key", "gemini_api_key"):
+            setattr(self, name, clean_secret(getattr(self, name)))
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         # Atomic: a crash mid-write must not leave a truncated config (which
@@ -654,6 +670,64 @@ def gemini_models() -> List[str]:
     return models or list(DEFAULT_GEMINI_MODELS)
 
 
+_GEMINI_UNAVAILABLE_MODELS: set[str] = set()
+_GEMINI_WARNED: set[str] = set()
+GEMINI_TIMEOUT_SECONDS = 45
+
+
+def _gemini_warn_once(key: str, message: str, *args: Any) -> None:
+    if key not in _GEMINI_WARNED:
+        _GEMINI_WARNED.add(key)
+        log.warning(message, *args)
+
+
+def gemini_generate(api_key: str, contents: str, accept: Callable[[str], bool]) -> Optional[str]:
+    """First Gemini reply that `accept` approves, trying gemini_models() in order.
+
+    A model name Google does not serve (404) is remembered and skipped for
+    the rest of the session; a rejected key (400/401/403) stops at once with
+    one readable warning instead of silently retrying every model; each call
+    is bounded so a stalled request cannot hold the job queue.
+    """
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+        try:
+            client = genai.Client(api_key=api_key,
+                                  http_options=genai_types.HttpOptions(timeout=GEMINI_TIMEOUT_SECONDS * 1000))
+        except Exception:
+            client = genai.Client(api_key=api_key)
+    except Exception as exc:
+        _gemini_warn_once("sdk", "Gemini is not available (%s). Run: pip install google-genai", exc)
+        return None
+
+    for model_name in gemini_models():
+        if model_name in _GEMINI_UNAVAILABLE_MODELS:
+            continue
+        try:
+            resp = client.models.generate_content(model=model_name, contents=contents)
+        except Exception as exc:
+            text = str(exc)
+            low = text.lower()
+            if "api_key_invalid" in low or "api key not valid" in low or "permission_denied" in low \
+                    or re.search(r"\b(401|403)\b", text):
+                _gemini_warn_once("key", "Gemini rejected the API key; check it in Settings (%s).", text[:160])
+                return None
+            if re.search(r"\b404\b", text) or "not_found" in low or "is not found" in low:
+                _GEMINI_UNAVAILABLE_MODELS.add(model_name)
+                log.info("Gemini model %s is not available for this key; skipping it.", model_name)
+                continue
+            if re.search(r"\b429\b", text) or "resource_exhausted" in low:
+                log.info("Gemini model %s is rate-limited; trying the next one.", model_name)
+                continue
+            log.debug("Gemini model %s failed: %s", model_name, exc)
+            continue
+        reply = (getattr(resp, "text", None) or "").strip()
+        if reply and accept(reply):
+            return reply
+    return None
+
+
 def narration_brief(language: str) -> str:
     brief = (
         "VOICEOVER DIRECTION: Speak to one curious viewer in a warm, conversational voice. "
@@ -692,31 +766,17 @@ class FreeLLMPromptEnhancer:
 
         # 1. Try Gemini AI Pro Plan (Google GenAI SDK)
         if gemini_key:
-            try:
-                from google import genai
-                client = genai.Client(api_key=gemini_key)
-                style_data = STYLE_PRESETS.get(style, STYLE_PRESETS["Cinematic"])
-                sys_inst = (
-                    f"Rewrite the idea as one achievable continuous video shot in the '{style}' aesthetic. "
-                    "Preserve every specified subject, action, location, time of day and exclusion. "
-                    "Add only compatible camera and lighting details; do not invent events or extra subjects. "
-                    f"Suggested color treatment: {style_data['grade']}. "
-                    "Output ONLY the prompt text, no commentary, under 75 words."
-                )
-
-                for model_name in gemini_models():
-                    try:
-                        resp = client.models.generate_content(
-                            model=model_name,
-                            contents=f"{sys_inst}\n\nUser Concept: {clean_p}"
-                        )
-                        if resp.text and looks_like_prompt(resp.text):
-                            return resp.text.strip().replace('"', '')
-                    except Exception as e_mod:
-                        log.debug("Gemini model %s note: %s", model_name, e_mod)
-                        continue
-            except Exception as exc:
-                log.debug("Gemini Pro API pass-through: %s", exc)
+            style_data = STYLE_PRESETS.get(style, STYLE_PRESETS["Cinematic"])
+            sys_inst = (
+                f"Rewrite the idea as one achievable continuous video shot in the '{style}' aesthetic. "
+                "Preserve every specified subject, action, location, time of day and exclusion. "
+                "Add only compatible camera and lighting details; do not invent events or extra subjects. "
+                f"Suggested color treatment: {style_data['grade']}. "
+                "Output ONLY the prompt text, no commentary, under 75 words."
+            )
+            reply = gemini_generate(gemini_key, f"{sys_inst}\n\nUser Concept: {clean_p}", looks_like_prompt)
+            if reply:
+                return reply.replace('"', '')
 
         # 2. Try Pollinations Free LLM Endpoint (No key / Zero billing)
         try:
@@ -754,33 +814,22 @@ class FreeLLMPromptEnhancer:
 
         # 1. Try Gemini AI Pro Plan for Scriptwriting
         if gemini_key:
-            try:
-                from google import genai
-                client = genai.Client(api_key=gemini_key)
-                sys_inst = (
-                    f"You are an award-winning documentary & cinematic video director. "
-                    f"Write an engaging {scene_count}-scene video script about '{prompt}' in {language}. "
-                    "For each scene, structure it EXACTLY as:\n\n"
-                    "Visual: [3-5 concrete visual keywords for footage or image generation, e.g., golden sunrise mountains drone aerial]\n"
-                    f"VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
-                    "Give each scene a distinct purpose: hook, explanation, concrete detail, then payoff. "
-                    "Keep visuals specific to the narration and vary shot scale without changing the subject. "
-                    "Use cautious factual language. Do not invent statistics, quotations or historical claims. "
-                    "Output ONLY the Visual: and VO: lines without headers or numbering."
-                )
-                sys_inst += "\n" + narration_brief(language)
-                for model_name in gemini_models():
-                    try:
-                        resp = client.models.generate_content(
-                            model=model_name,
-                            contents=sys_inst
-                        )
-                        if resp.text and usable(resp.text):
-                            return resp.text.strip()
-                    except Exception:
-                        continue
-            except Exception as e:
-                log.debug("Gemini script generation fallback: %s", e)
+            sys_inst = (
+                f"You are an award-winning documentary & cinematic video director. "
+                f"Write an engaging {scene_count}-scene video script about '{prompt}' in {language}. "
+                "For each scene, structure it EXACTLY as:\n\n"
+                "Visual: [3-5 concrete English visual keywords for stock footage or image generation, "
+                "e.g., golden sunrise mountains drone aerial]\n"
+                f"VO: [1-2 sentences of spoken voiceover narration in {language}]\n\n"
+                "Give each scene a distinct purpose: hook, explanation, concrete detail, then payoff. "
+                "Keep visuals specific to the narration and vary shot scale without changing the subject. "
+                "Use cautious factual language. Do not invent statistics, quotations or historical claims. "
+                "Output ONLY the Visual: and VO: lines without headers or numbering."
+            )
+            sys_inst += "\n" + narration_brief(language)
+            reply = gemini_generate(gemini_key, sys_inst, usable)
+            if reply:
+                return reply
 
         # 2. Free Pollinations text model (no key, no billing)
         try:
@@ -1082,8 +1131,9 @@ class GenerationBackend:
 class ColabBackend(GenerationBackend):
     name = "colab"
     description = "Free Google Colab T4 GPU Worker (Wan2.1)"
-    # Free T4 renders for 89-frame 30-step chunks + CPU UMT5 encoding can run past 15m.
-    PREDICT_TIMEOUT = 1800
+    # A T4 needs about a minute per step for a 5.5 s chunk (the worker caps it
+    # at 25 steps), plus CPU text encoding; L4/A100 finish in a few minutes.
+    PREDICT_TIMEOUT = 2700
 
     def __init__(self, config: StudioConfig):
         self.config = config
@@ -1407,6 +1457,45 @@ class TestPatternBackend(GenerationBackend):
 # 5. Media & Stock Asset Fetcher
 # ----------------------------------------------------------------------------
 
+_STOCK_STOPWORDS = frozenset("""
+a an the and or but of to in on at by for with from into onto over under above below about as is are was were
+be been being it its this that these those there their his her our your my we you they he she them us very
+some any each every while then than so such just also only same other another more most much many few
+through across along near around inside outside behind between toward towards beneath under up down
+shot scene video footage clip image picture photo showing shows show cinematic cinematography film filmic
+still motion moving
+style aesthetic visual treatment camera lens mm wide angle close closeup up slow motion dolly pan tilt
+tracking steadicam handheld gimbal drone aerial view frame framing lighting light lit color colour colors
+grading graded grade tone mood atmosphere atmospheric high quality detailed ultra hd 4k 8k k realistic
+photorealistic hyper masterpiece beautiful stunning epic dramatic
+""".split())
+
+
+def stock_query(text: str, max_words: int = 6, max_chars: int = 90) -> str:
+    """Short keyword query for stock search engines.
+
+    Pixabay rejects a ``q`` longer than 100 characters (HTTP 400) and both
+    Pexels and Pixabay return nothing for a 40-word cinematic prompt. Keep
+    the first few concrete words: the subject usually comes first.
+    """
+    text = re.sub(r"(?is)\bvisual treatment:.*$", "", text or "")
+    for preset in STYLE_PRESETS.values():           # an enhanced prompt starts with one
+        if text.startswith(preset["prefix"]):
+            text = text[len(preset["prefix"]):]
+            break
+    words = re.findall(r"[^\W\d_][\w'-]*", text, flags=re.UNICODE)
+    picked: List[str] = []
+    for word in words:
+        low = word.lower().strip("'-")
+        if len(low) < 2 or low in _STOCK_STOPWORDS or low in (w.lower() for w in picked):
+            continue
+        picked.append(low)
+        if len(picked) >= max_words:
+            break
+    query = " ".join(picked) or " ".join(words[:max_words]).lower()
+    return query[:max_chars].rsplit(" ", 1)[0] if len(query) > max_chars else query
+
+
 class MediaFetcher:
     """Intelligent Media & Stock Asset Fetcher (Pexels, Pixabay, Wikimedia, Pollinations Flux AI, Gemini)."""
 
@@ -1417,6 +1506,27 @@ class MediaFetcher:
         self.cache_dir = DEFAULT_OUTPUT_DIR / "media_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._recent_assets: List[str] = []
+        self._warned: set[str] = set()
+
+    def _api_ok(self, provider: str, resp: Any) -> bool:
+        """True for HTTP 200. Otherwise log ONE readable warning per provider
+        and status, so a wrong key or an exhausted limit is visible in the
+        log instead of silently falling through to other sources."""
+        status = getattr(resp, "status_code", 0)
+        if status == 200:
+            return True
+        hints = {
+            400: "the search was rejected",
+            401: "the API key was rejected — check it in Settings",
+            403: "the API key was rejected — check it in Settings",
+            429: "the request limit is reached for now; it resets by itself",
+        }
+        key = f"{provider}:{status}"
+        if key not in self._warned:
+            self._warned.add(key)
+            log.warning("%s stock search failed (HTTP %s): %s.", provider, status,
+                        hints.get(status, "the service is unavailable right now"))
+        return False
 
     def _stock_asset(self, source: str, asset_id: Any, url: str, suffix: str,
                      min_bytes: int) -> Optional[str]:
@@ -1433,11 +1543,22 @@ class MediaFetcher:
 
     @staticmethod
     def _framing_score(item: dict, width: int, height: int) -> float:
-        """Prefer files that retain detail after the requested aspect-ratio crop."""
-        w, h = item.get("width", 0), item.get("height", 0)
-        if not w or not h:
+        """Lower is better: the right shape first, then the right size.
+
+        The aspect term keeps detail after the crop. The size term prefers a
+        file at about the output size: an upscaled file loses detail, while a
+        4K file for a 1080p video only costs a slow 100+ MB download that
+        often times out (the old score ranked 4K first)."""
+        try:
+            w, h = float(item.get("width") or 0), float(item.get("height") or 0)
+        except (TypeError, ValueError):
             return float("inf")
-        return abs(math.log((w / h) / (width / height))) * 4 + max(width / w, height / h)
+        if w <= 0 or h <= 0 or width <= 0 or height <= 0:
+            return float("inf")
+        aspect = abs(math.log((w / h) / (width / height))) * 4
+        scale = max(width / w, height / h)          # >1: the file must be upscaled
+        size = (scale - 1) * 2 if scale > 1 else (1 / scale - 1) * 0.25
+        return aspect + size
 
     def fetch_scene_visual(
         self,
@@ -1454,38 +1575,42 @@ class MediaFetcher:
         reused only if every provider fails. A new storyboard scene should not
         use this option: the previous visual may not illustrate its narration.
         """
-        clean_q = re.sub(r"[^\w\s]", " ", prompt).strip()
+        clean_q = stock_query(prompt) or re.sub(r"[^\w\s]", " ", prompt).strip()[:90]
+        # A narrower query first; if it finds nothing, the first three words.
+        queries = [clean_q]
+        short_q = " ".join(clean_q.split()[:3])
+        if short_q and short_q != clean_q:
+            queries.append(short_q)
 
-        # 1. Try Pexels Video Search
+        searches: List[Tuple[str, str, Callable[[str], Optional[str]]]] = []
         if prefer_video and self.config.pexels_api_key:
-            try:
-                vid = self._search_pexels_video(clean_q, target_width, target_height)
-                if vid:
-                    return vid, "video"
-            except Exception as e:
-                log.debug("Pexels video search fallback: %s", e)
-
-        # 2. Try Pixabay Video Search
+            searches.append(("Pexels video", "video",
+                             lambda q: self._search_pexels_video(q, target_width, target_height)))
         if prefer_video and self.config.pixabay_api_key:
-            try:
-                vid = self._search_pixabay_video(clean_q)
-                if vid:
-                    return vid, "video"
-            except Exception as e:
-                log.debug("Pixabay video search fallback: %s", e)
-
-        # 3. Try Pexels Photo Search
+            searches.append(("Pixabay video", "video",
+                             lambda q: self._search_pixabay_video(q, target_width, target_height)))
         if self.config.pexels_api_key:
-            try:
-                img = self._search_pexels_photo(clean_q, target_width, target_height)
-                if img:
-                    return img, "image"
-            except Exception as e:
-                log.debug("Pexels photo search fallback: %s", e)
+            searches.append(("Pexels photo", "image",
+                             lambda q: self._search_pexels_photo(q, target_width, target_height)))
+        if self.config.pixabay_api_key:
+            searches.append(("Pixabay photo", "image",
+                             lambda q: self._search_pixabay_photo(q, target_width, target_height)))
+
+        # 1-4. Stock video first (real motion), then stock photos
+        for query in queries:
+            for label, kind, search in searches:
+                try:
+                    found = search(query)
+                    if found:
+                        log.info("Visual for %r: %s", query, label)
+                        return found, kind
+                except Exception as e:
+                    log.debug("%s search fallback: %s", label, e)
 
         # 4. Try Wikimedia Commons Search
         try:
-            wiki_img = self._search_wikimedia(clean_q)
+            wiki_img = next(filter(None, (self._search_wikimedia(q, target_width, target_height)
+                                          for q in queries)), None)
             if wiki_img:
                 return wiki_img, "image"
         except Exception as e:
@@ -1548,37 +1673,65 @@ class MediaFetcher:
             params={"query": query, "per_page": 12, "orientation": orientation},
             headers=headers, timeout=10,
         )
-        if resp.status_code == 200:
+        if self._api_ok("Pexels", resp):
             data = resp.json()
             videos = data.get("videos", [])
             videos.sort(key=lambda v: f"pexels:{v.get('id')}" in self._recent_assets)
-            for v in videos:
+            for v in videos[:6]:
                 files = [f for f in v.get("video_files", [])
                          if f.get("link") and f.get("file_type", "video/mp4") == "video/mp4"]
                 files.sort(key=lambda f: self._framing_score(f, width, height))
-                for vf in files:
+                for vf in files[:2]:     # best rendition, one backup; then the next video
                     got = self._stock_asset("pexels", v.get("id", vf["link"]), vf["link"], ".mp4", 50_000)
                     if got:
                         return got
         return None
 
-    def _search_pixabay_video(self, query: str) -> Optional[str]:
+    def _search_pixabay_video(self, query: str, width: int = 1920, height: int = 1080) -> Optional[str]:
         import requests
         # Key goes in `params`, never hand-built into a URL string that can be
         # echoed into logs / exception messages.
         resp = requests.get(
             "https://pixabay.com/api/videos/",
-            params={"key": self.config.pixabay_api_key, "q": query, "per_page": 12},
+            params={"key": self.config.pixabay_api_key, "q": query[:100], "per_page": 20,
+                    "safesearch": "true"},
             timeout=10,
         )
-        if resp.status_code == 200:
+        if self._api_ok("Pixabay", resp):
+            ranked = []
+            for hit in resp.json().get("hits", []):
+                renditions = [r for r in (hit.get("videos") or {}).values()
+                              if isinstance(r, dict) and r.get("url")]
+                if renditions:
+                    best = min(renditions, key=lambda r: self._framing_score(r, width, height))
+                    ranked.append((f"pixabay:{hit.get('id')}" in self._recent_assets,
+                                   self._framing_score(best, width, height), hit, best))
+            # Pixabay has no orientation filter for video: rank by shape here.
+            ranked.sort(key=lambda item: item[:2])
+            for _, _, hit, chosen in ranked[:6]:
+                got = self._stock_asset("pixabay", hit.get("id", chosen["url"]), chosen["url"], ".mp4", 50_000)
+                if got:
+                    return got
+        return None
+
+    def _search_pixabay_photo(self, query: str, width: int, height: int) -> Optional[str]:
+        import requests
+        resp = requests.get(
+            "https://pixabay.com/api/",
+            params={"key": self.config.pixabay_api_key, "q": query[:100], "per_page": 20,
+                    "image_type": "photo", "safesearch": "true",
+                    "orientation": "vertical" if height > width else "horizontal"},
+            timeout=10,
+        )
+        if self._api_ok("Pixabay", resp):
             hits = resp.json().get("hits", [])
-            hits.sort(key=lambda v: f"pixabay:{v.get('id')}" in self._recent_assets)
-            for hit in hits:
-                vids = hit.get("videos", {})
-                chosen = vids.get("large") or vids.get("medium") or vids.get("small")
-                if chosen and chosen.get("url"):
-                    got = self._stock_asset("pixabay", hit.get("id", chosen["url"]), chosen["url"], ".mp4", 50_000)
+            hits.sort(key=lambda p: (f"pixabay_photo:{p.get('id')}" in self._recent_assets,
+                                     self._framing_score({"width": p.get("imageWidth"),
+                                                          "height": p.get("imageHeight")}, width, height)))
+            for photo in hits[:6]:
+                src = photo.get("largeImageURL") or photo.get("webformatURL")
+                if src:
+                    got = self._stock_asset("pixabay_photo", photo.get("id", src), src, ".jpg", 5_000)
                     if got:
                         return got
         return None
@@ -1592,11 +1745,11 @@ class MediaFetcher:
             params={"query": query, "per_page": 12, "orientation": orientation},
             headers=headers, timeout=10,
         )
-        if resp.status_code == 200:
+        if self._api_ok("Pexels", resp):
             photos = resp.json().get("photos", [])
             photos.sort(key=lambda p: (f"pexels_photo:{p.get('id')}" in self._recent_assets,
                                        self._framing_score(p, width, height)))
-            for photo in photos:
+            for photo in photos[:6]:
                 src = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("large")
                 if src:
                     got = self._stock_asset("pexels_photo", photo.get("id", src), src, ".jpg", 5_000)
@@ -1604,27 +1757,43 @@ class MediaFetcher:
                         return got
         return None
 
-    def _search_wikimedia(self, query: str) -> Optional[str]:
+    # Wikimedia asks API clients for a descriptive User-Agent with a way to
+    # find the project; generic agents are throttled (HTTP 429) much sooner.
+    WIKIMEDIA_UA = "VideoStudio/3.2 (https://github.com/Kamran5H/VideoStudio; desktop video maker)"
+
+    def _search_wikimedia(self, query: str, width: int = 1920, height: int = 1080) -> Optional[str]:
         import requests
-        url = "https://commons.wikimedia.org/w/api.php"
+        headers = {"User-Agent": self.WIKIMEDIA_UA}
         params = {
-            "action": "query", "generator": "search", "gsrsearch": f"{query} filetype:bitmap",
-            "gsrlimit": 3, "prop": "imageinfo", "iiprop": "url|mime", "format": "json"
+            "action": "query", "format": "json", "formatversion": 2,
+            "generator": "search", "gsrsearch": f"{query} filetype:bitmap",
+            "gsrnamespace": 6,                       # File: pages only
+            "gsrlimit": 10, "prop": "imageinfo", "iiprop": "url|mime|size",
+            # A scaled copy instead of the original, which can be a 50 MB scan.
+            "iiurlwidth": max(int(width), int(height), 1280),
         }
-        resp = requests.get(url, params=params, headers={"User-Agent": "VideoStudioPro/3.0"}, timeout=10)
-        if resp.status_code == 200:
-            pages = resp.json().get("query", {}).get("pages", {})
-            for p in pages.values():
-                info = p.get("imageinfo", [])
-                if info and "url" in info[0]:
-                    img_url = info[0]["url"]
-                    if img_url.lower().endswith((".jpg", ".jpeg", ".png")):
-                        ext = ".png" if img_url.lower().endswith(".png") else ".jpg"
-                        out = self.cache_dir / f"wiki_{uuid.uuid4().hex[:8]}{ext}"
-                        got = self._download(img_url, out, min_bytes=5_000,
-                                             headers={"User-Agent": "VideoStudioPro/3.0"})
-                        if got:
-                            return got
+        resp = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                            headers=headers, timeout=10)
+        if not self._api_ok("Wikimedia", resp):
+            return None
+        pages = resp.json().get("query", {}).get("pages", [])
+        if isinstance(pages, dict):                  # formatversion 1 shape
+            pages = list(pages.values())
+        candidates = []
+        for page in pages:
+            info = (page.get("imageinfo") or [{}])[0]
+            url = info.get("thumburl") or info.get("url")
+            if url and info.get("mime") in ("image/jpeg", "image/png"):
+                candidates.append((self._framing_score(info, width, height), url, info["mime"]))
+        candidates.sort(key=lambda c: c[0])
+        for _, url, mime in candidates[:4]:
+            ext = ".png" if mime == "image/png" else ".jpg"
+            out = self.cache_dir / f"wiki_{zlib.crc32(url.encode()):08x}{ext}"
+            if out.exists() and out.stat().st_size >= 5_000:
+                return str(out)
+            got = self._download(url, out, min_bytes=5_000, headers=headers)
+            if got:
+                return got
         return None
 
     @staticmethod
