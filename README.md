@@ -124,7 +124,7 @@ pyright app.py video_studio.py                # type check
 python -m unittest discover -s tests -v       # offline tests (run real FFmpeg, no network)
 ```
 
-Tests write to a temporary output folder, never your `outputs/`. `test_verify.py` and `test_gemini_features.py` are opt-in **live** smoke checks: they use the network and API quota, so CI does not run them.
+Tests write to a temporary output folder, never your `outputs/`. `scripts/verify_live.py` and `scripts/verify_gemini_live.py` are opt-in **live** smoke checks: they use the network and API quota, so CI does not run them.
 
 ## Repository layout
 
@@ -160,7 +160,7 @@ Copyright (c) 2024-2026 **Kamran Ashraf**. `Wan2.1-main/` keeps its own Apache-2
 *AI Systems Architect • Computational Physical Chemist • Automation Pioneer*
 
 [![Developer Profile](https://img.shields.io/badge/GitHub-Kamran5H-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/Kamran5H)
-[![Developer Portfolio](https://img.shields.io/badge/Portfolio-Visit%20Website-00F2FE?style=flat-square&logo=vercel&logoColor=black)](https://kamran5h.github.io/Portfolio/)
+[![Developer Portfolio](https://img.shields.io/badge/Portfolio-Visit%20Website-00F2FE?style=flat-square&logo=vercel&logoColor=black)](https://kamranashraf.is-a.dev)
 [![Contact Email](https://img.shields.io/badge/Email-chkamran32b%40gmail.com-EA4335?style=flat-square&logo=gmail&logoColor=white)](mailto:chkamran32b@gmail.com)
 
 </div>
